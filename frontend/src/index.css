@@ -1,0 +1,160 @@
+/* ─────────────────────────────────────────────────────────────
+   index.css  —  Global styles for Live Translator
+   Soft dark theme: never pure black, reduce eye strain
+   ───────────────────────────────────────────────────────────── */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base reset ──────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #121212;
+  color: #e2e8f0;
+  font-family: Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* No page-level scroll — everything is contained */
+}
+
+/* Custom scrollbar for any internal scrollable areas */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2d3f57;
+}
+
+/* ── Utility layer ────────────────────────────────────────────── */
+/* Glass morphism card */
+.glass {
+  background: rgba(30, 41, 59, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(51, 65, 85, 0.5);
+}
+
+/* Gradient text */
+.gradient-text {
+  background-image: linear-gradient(135deg, #38bdf8 0%, #a78bfa 50%, #fbbf24 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+/* Glow effect for active recording */
+.recording-glow {
+  box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7);
+  animation: recordingPulse 1.5s ease-in-out infinite;
+}
+
+/* Slide transition on subtitle update */
+.subtitle-enter {
+  animation: slideUp 0.25s ease-out forwards;
+}
+
+/* ── Custom keyframes not in Tailwind config ──────────────────── */
+@keyframes recordingPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); }
+  70%  { box-shadow: 0 0 0 12px rgba(52, 211, 153, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+}
+
+/* ── PDF viewer canvas sizing ─────────────────────────────────── */
+.pdf-page-canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain;
+}
+
+/* react-pdf canvas override */
+.react-pdf__Page__canvas {
+  width: 100% !important;
+  height: auto !important;
+  max-height: 100%;
+}
+
+.react-pdf__Page {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+}
+
+/* ── Drag-and-drop highlight ─────────────────────────────────── */
+.drop-active {
+  border: 2px solid #38bdf8;
+  background: rgba(56, 189, 248, 0.08);
+}
+
+/* ── Button base styles ──────────────────────────────────────── */
+.btn-start {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  user-select: none;
+  cursor: pointer;
+  background: radial-gradient(circle at 30% 30%, #4ade80, #16a34a);
+  box-shadow: 0 4px 20px rgba(74, 222, 128, 0.35);
+}
+
+.btn-start:hover:not(:disabled) {
+  transform: scale(1.06);
+  box-shadow: 0 6px 28px rgba(74, 222, 128, 0.55);
+}
+
+.btn-start:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn-stop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  user-select: none;
+  cursor: pointer;
+  background: radial-gradient(circle at 30% 30%, #f87171, #dc2626);
+  box-shadow: 0 4px 20px rgba(248, 113, 113, 0.35);
+}
+
+.btn-stop:hover:not(:disabled) {
+  transform: scale(1.06);
+  box-shadow: 0 6px 28px rgba(248, 113, 113, 0.55);
+}
+
+.btn-stop:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn-start:disabled,
+.btn-stop:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}

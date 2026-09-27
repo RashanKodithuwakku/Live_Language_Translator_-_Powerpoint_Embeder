@@ -1,0 +1,44 @@
+# ─── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# ─── Virtual environments ──────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env
+backend/.env
+
+# ─── Google Cloud credentials (NEVER commit these) ────────────────────────
+*.json
+!package.json
+!package-lock.json
+keys/
+
+# ─── Node / npm ───────────────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+
+# ─── Vite build output ────────────────────────────────────────────────────
+frontend/dist/
+
+# ─── Editor / OS ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── Logs ─────────────────────────────────────────────────────────────────
+*.log
+logs/
