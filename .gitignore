@@ -21,7 +21,18 @@ backend/.env
 *.json
 !package.json
 !package-lock.json
+!tsconfig*.json
 keys/
+backend/keys/
+backend/*service*account*.json
+backend/live-translator-*.json
+**/credentials*.json
+**/*-credentials.json
+**/*service-account*.json
+.env.*
+!.env.example
+backend/.env.*
+!backend/.env.example
 
 # ─── Node / npm ───────────────────────────────────────────────────────────
 node_modules/
@@ -42,3 +53,6 @@ Thumbs.db
 # ─── Logs ─────────────────────────────────────────────────────────────────
 *.log
 logs/
+
+# Converted presentation cache
+backend/.presentations/

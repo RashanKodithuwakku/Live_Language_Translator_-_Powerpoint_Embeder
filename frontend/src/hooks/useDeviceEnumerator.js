@@ -1,117 +1,109 @@
 /**
  * useDeviceEnumerator.js
  * ──────────────────────
- * Enumerates available audio input devices and attempts to auto-select
- * the USB sound card if one is detected.
+ * Lists audio inputs (for the mixer feed) and audio outputs (for slide
+ * video sound), and auto-selects the USB sound card.
  *
- * USB device identification heuristic:
- *   We match device labels containing "USB Audio", "USB", "CODEC",
- *   or any common USB audio interface brand (Behringer, Focusrite,
- *   MOTU, PreSonus, Scarlett, Yamaha, Roland, Tascam, etc.).
- *   The operator can always override via the dropdown.
+ * USB detection: device labels containing "USB" or a common audio-interface
+ * brand. Windows also lists virtual "Default - …" and "Communications - …"
+ * aliases; we prefer the concrete device so capture stays pinned to the
+ * sound card even if someone changes the Windows default mid-event.
  *
- * Permission note:
- *   enumerateDevices() returns full labels only AFTER the user has
- *   granted microphone permission. We therefore trigger an initial
- *   getUserMedia() call to prompt for permission, then enumerate.
+ * Labels are only exposed after microphone permission is granted, so a
+ * short permission probe runs first.
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
-const USB_KEYWORDS = [
-  'usb audio',
-  'usb',
-  'codec',
-  'focusrite',
-  'scarlett',
-  'behringer',
-  'motu',
-  'presonus',
-  'roland',
-  'tascam',
-  'yamaha',
-  'steinberg',
-  'audient',
-  'universal audio',
-  'mackie',
-  'sound card',
-  'line in',
-  'external',
-]
+const USB_PATTERN =
+  /\busb\b|behringer|focusrite|scarlett|presonus|steinberg|roland|tascam|yamaha|audient|motu|mackie|m-audio|zoom|ugreen|sound ?blaster|creative|u-phoria|umc\d/i
 
-function isLikelyUSBDevice(label) {
-  const lower = label.toLowerCase()
-  return USB_KEYWORDS.some((kw) => lower.includes(kw))
+const ALIAS_IDS = new Set(['default', 'communications'])
+
+function describePermissionError(err) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+      return 'Microphone access is blocked for this page. Click the lock icon in the address bar → allow Microphone → Retry.'
+    case 'NotFoundError':
+      return 'No audio input found. Plug in the USB sound card, then Retry.'
+    case 'NotReadableError':
+      return 'Audio input is busy (another app may be using it). Close it, then Retry.'
+    default:
+      return err?.message || 'Could not access audio devices.'
+  }
+}
+
+function pickPreferred(inputs) {
+  const concrete = inputs.filter((d) => !ALIAS_IDS.has(d.deviceId))
+  return (
+    concrete.find((d) => d.isUSB) ||
+    inputs.find((d) => d.isUSB) ||
+    inputs.find((d) => d.deviceId === 'default') ||
+    inputs[0]
+  )
 }
 
 export function useDeviceEnumerator() {
-  const [devices, setDevices] = useState([]) // { deviceId, label, isUSB }[]
+  const [inputs, setInputs] = useState([])
+  const [outputs, setOutputs] = useState([])
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
-  const [permissionGranted, setPermissionGranted] = useState(false)
-  const [enumerating, setEnumerating] = useState(false)
   const [permissionError, setPermissionError] = useState(null)
+  const [enumerating, setEnumerating] = useState(false)
+  const permissionGrantedRef = useRef(false)
 
   const enumerate = useCallback(async () => {
     setEnumerating(true)
     try {
-      // Trigger permission prompt if not already granted
-      // (labels are empty strings until permission is granted)
-      if (!permissionGranted) {
+      if (!permissionGrantedRef.current) {
         try {
-          const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-          tempStream.getTracks().forEach((t) => t.stop())
-          setPermissionGranted(true)
-        } catch (permErr) {
-          setPermissionError('Microphone permission denied. Please allow microphone access.')
-          setEnumerating(false)
+          const probe = await navigator.mediaDevices.getUserMedia({ audio: true })
+          probe.getTracks().forEach((t) => t.stop())
+          permissionGrantedRef.current = true
+        } catch (err) {
+          setPermissionError(describePermissionError(err))
           return
         }
       }
+      setPermissionError(null)
 
       const all = await navigator.mediaDevices.enumerateDevices()
       const audioInputs = all
         .filter((d) => d.kind === 'audioinput')
         .map((d) => ({
           deviceId: d.deviceId,
-          label: d.label || `Microphone (${d.deviceId.slice(0, 8)}...)`,
-          isUSB: isLikelyUSBDevice(d.label),
+          label: d.label || `Audio input ${d.deviceId.slice(0, 6)}`,
+          isUSB: USB_PATTERN.test(d.label),
         }))
+      const audioOutputs = all
+        .filter((d) => d.kind === 'audiooutput')
+        .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Audio output' }))
 
-      setDevices(audioInputs)
-
-      // Auto-select: prefer first USB-like device, fall back to first device
-      const usbDevice = audioInputs.find((d) => d.isUSB)
-      const defaultDevice = audioInputs.find((d) => d.deviceId === 'default') || audioInputs[0]
-
-      setSelectedDeviceId((prev) => {
-        // Don't override a manual selection
-        if (prev && audioInputs.some((d) => d.deviceId === prev)) return prev
-        return usbDevice?.deviceId || defaultDevice?.deviceId || null
-      })
+      setInputs(audioInputs)
+      setOutputs(audioOutputs)
+      setSelectedDeviceId((prev) =>
+        prev && audioInputs.some((d) => d.deviceId === prev)
+          ? prev
+          : pickPreferred(audioInputs)?.deviceId ?? null,
+      )
     } catch (err) {
       console.error('[Devices] Enumeration failed:', err)
+      setPermissionError(describePermissionError(err))
     } finally {
       setEnumerating(false)
     }
-  }, [permissionGranted])
+  }, [])
 
-  // Enumerate on mount
   useEffect(() => {
     enumerate()
-  }, [enumerate])
-
-  // Re-enumerate when devices change (USB plug/unplug)
-  useEffect(() => {
-    const handler = () => enumerate()
-    navigator.mediaDevices.addEventListener('devicechange', handler)
-    return () => navigator.mediaDevices.removeEventListener('devicechange', handler)
+    navigator.mediaDevices.addEventListener('devicechange', enumerate)
+    return () => navigator.mediaDevices.removeEventListener('devicechange', enumerate)
   }, [enumerate])
 
   return {
-    devices,
+    inputs,
+    outputs,
     selectedDeviceId,
     setSelectedDeviceId,
-    permissionGranted,
     permissionError,
     enumerating,
     refresh: enumerate,

@@ -1,115 +1,134 @@
 /**
  * DeviceSelector.jsx
  * ──────────────────
- * Dropdown + status display for audio input device selection.
- *
- * Critical UX note (from spec):
- *   Getting the wrong audio device live is the single biggest failure risk.
- *   This component prominently shows which device is ACTIVE, highlights
- *   USB-detected devices with a badge, and always keeps the full list
- *   visible so the operator can verify and override.
+ * Compact operator control for the mixer feed (USB sound card) plus the
+ * slide-media audio options. Deliberately small so the audience's eyes stay
+ * on the slides and subtitles, but the active input is always spelled out
+ * in one line — the wrong input is the biggest live failure risk.
  */
 
 import React from 'react'
 
+const selectClass =
+  'w-full min-w-0 truncate rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-slate-200 outline-none focus:border-primary disabled:cursor-not-allowed disabled:opacity-60'
+
+// Google weighs the first language far more than the alternatives, so the
+// speaker's main language must be first or their speech is misrecognized.
+const SPEAKER_LANGUAGES = [
+  { code: 'si-LK', label: 'Speaker: Sinhala' },
+  { code: 'ta-LK', label: 'Speaker: Tamil' },
+  { code: 'en-US', label: 'Speaker: English' },
+]
+
 export default function DeviceSelector({
-  devices,
+  inputs,
+  outputs,
   selectedDeviceId,
   onSelect,
-  disabled,
+  locked,
   permissionError,
   enumerating,
   onRefresh,
+  speakerLanguage,
+  onSpeakerLanguageChange,
+  mediaSinkId,
+  onMediaSinkChange,
+  pauseDuringMedia,
+  onPauseDuringMediaChange,
 }) {
-  const selectedDevice = devices.find((d) => d.deviceId === selectedDeviceId)
+  const selected = inputs.find((d) => d.deviceId === selectedDeviceId)
 
   return (
-    <div className="flex flex-col gap-2">
-      {/* Label row */}
-      <div className="flex items-center justify-between">
-        <label className="text-xs font-semibold uppercase tracking-widest text-slate-400">
-          Audio Input Device
-        </label>
-        <button
-          onClick={onRefresh}
-          disabled={disabled || enumerating}
-          className="text-xs text-primary hover:text-sky-300 transition-colors disabled:opacity-40"
-          title="Refresh device list"
-        >
-          {enumerating ? '↻ Scanning…' : '↻ Refresh'}
-        </button>
-      </div>
-
-      {/* Permission error */}
-      {permissionError && (
-        <div className="flex items-center gap-2 rounded-lg bg-red-900/30 border border-red-700/50 px-3 py-2 text-xs text-red-300">
-          <span>⚠</span>
-          <span>{permissionError}</span>
+    <div className="flex min-w-0 flex-col gap-1">
+      <select
+        value={speakerLanguage}
+        onChange={(e) => onSpeakerLanguageChange(e.target.value)}
+        disabled={locked}
+        className={selectClass}
+        title={locked ? 'Stop translation to change the speaker language' : "Speaker's main language (the other two are still detected)"}
+        aria-label="Speaker language"
+      >
+        {SPEAKER_LANGUAGES.map((l) => (
+          <option key={l.code} value={l.code}>{l.label}</option>
+        ))}
+      </select>
+      {permissionError ? (
+        <div className="flex flex-col items-start gap-1 rounded-md bg-red-950/50 px-2 py-1 text-[11px] leading-snug text-red-300 ring-1 ring-red-800/50">
+          {permissionError}
+          <button type="button" onClick={onRefresh} disabled={enumerating} className="font-semibold underline hover:text-white">
+            {enumerating ? 'Checking…' : 'Retry'}
+          </button>
         </div>
+      ) : (
+        <>
+          <div className="flex items-center gap-1">
+            <select
+              value={selectedDeviceId || ''}
+              onChange={(e) => onSelect(e.target.value)}
+              disabled={locked || inputs.length === 0}
+              className={selectClass}
+              title={selected ? `Audio input: ${selected.label}` : 'Audio input'}
+              aria-label="Audio input device"
+            >
+              {inputs.length === 0 && <option value="">No inputs found</option>}
+              {inputs.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.isUSB ? '[USB] ' : ''}{d.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={locked || enumerating}
+              className={`shrink-0 rounded-md px-1 text-sm text-slate-500 hover:text-primary disabled:opacity-40 ${enumerating ? 'animate-spin' : ''}`}
+              title="Rescan audio devices"
+              aria-label="Rescan audio devices"
+            >
+              ↻
+            </button>
+          </div>
+          {selected && (
+            <p
+              className={`flex items-center gap-1 truncate text-[10px] ${selected.isUSB ? 'text-emerald-400' : 'text-amber-400'}`}
+              title={selected.label}
+            >
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${selected.isUSB ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+              {selected.isUSB ? 'USB sound card active' : 'Not a USB device — check selection'}
+            </p>
+          )}
+        </>
       )}
 
-      {/* Dropdown */}
-      <div className="relative">
-        <select
-          value={selectedDeviceId || ''}
-          onChange={(e) => onSelect(e.target.value)}
-          disabled={disabled || enumerating || devices.length === 0}
-          className={`
-            w-full appearance-none rounded-xl px-4 py-2.5 pr-10 text-sm font-medium
-            bg-surface-2 border transition-all duration-200 outline-none cursor-pointer
-            ${disabled
-              ? 'border-border text-slate-500 cursor-not-allowed'
-              : 'border-border text-slate-100 hover:border-primary focus:border-primary focus:ring-1 focus:ring-primary/40'
-            }
-          `}
-        >
-          {devices.length === 0 ? (
-            <option value="">No audio devices found</option>
-          ) : (
-            devices.map((device) => (
-              <option key={device.deviceId} value={device.deviceId}>
-                {device.isUSB ? '🔌 ' : '🎤 '}
-                {device.label}
-                {device.isUSB ? ' [USB]' : ''}
-              </option>
-            ))
-          )}
-        </select>
-
-        {/* Custom chevron */}
-        <div className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+      <details className="group text-[10px] text-slate-500">
+        <summary className="cursor-pointer select-none list-none hover:text-slate-300">
+          <span className="inline-block transition-transform group-open:rotate-90">›</span> Slide video audio
+        </summary>
+        <div className="mt-1 flex flex-col gap-1">
+          <select
+            value={mediaSinkId}
+            onChange={(e) => onMediaSinkChange(e.target.value)}
+            className={selectClass}
+            aria-label="Output device for slide videos"
+          >
+            <option value="">System default output</option>
+            {outputs
+              .filter((d) => d.deviceId !== 'default' && d.deviceId !== 'communications')
+              .map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
+              ))}
+          </select>
+          <label className="flex cursor-pointer items-center gap-1.5 text-slate-400">
+            <input
+              type="checkbox"
+              checked={pauseDuringMedia}
+              onChange={(e) => onPauseDuringMediaChange(e.target.checked)}
+              className="accent-sky-400"
+            />
+            Pause captions while slide media plays
+          </label>
         </div>
-      </div>
-
-      {/* Active device status */}
-      {selectedDevice && (
-        <div className={`
-          flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium border
-          ${selectedDevice.isUSB
-            ? 'bg-emerald-900/20 border-emerald-700/40 text-emerald-300'
-            : 'bg-sky-900/20 border-sky-700/40 text-sky-300'
-          }
-        `}>
-          <span className="flex-shrink-0">
-            {selectedDevice.isUSB ? '✓ USB Device Active:' : '✓ Active:'}
-          </span>
-          <span className="truncate font-semibold">{selectedDevice.label}</span>
-          {selectedDevice.isUSB && (
-            <span className="ml-auto flex-shrink-0 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-400 border border-emerald-500/30">
-              USB
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Hint */}
-      <p className="text-[11px] text-slate-500 leading-relaxed">
-        Select the <strong className="text-slate-400">USB sound card</strong> connected to the audio mixer.
-        The active device is shown above — verify this before starting.
-      </p>
+      </details>
     </div>
   )
 }

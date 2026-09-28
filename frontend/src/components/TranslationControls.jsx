@@ -1,127 +1,106 @@
 /**
  * TranslationControls.jsx
  * ───────────────────────
- * Start/Stop buttons + VU meter for the live translation session.
- *
- * Visual design:
- *   - Large circular buttons (80px diameter) — impossible to miss under
- *     stage lighting with reduced screen brightness
- *   - Green Start (radial gradient, glow shadow)
- *   - Red Stop (radial gradient, glow shadow)
- *   - VU meter below buttons shows current microphone signal level
- *   - Connection status shown as a badge
+ * Compact Start/Stop buttons, session status and a slim input meter.
+ * Buttons are fixed-size circles (shrink-0) so they never squash when the
+ * panel is short.
  */
 
 import React from 'react'
 
-// ── VU Meter ──────────────────────────────────────────────────────────────
-function VUMeter({ level }) {
-  const bars = 20
-  const activeCount = Math.round((level / 100) * bars)
-
-  return (
-    <div className="flex items-end gap-0.5 h-5" title={`Input level: ${level}%`}>
-      {Array.from({ length: bars }).map((_, i) => {
-        const active = i < activeCount
-        const isHot = i >= bars * 0.8
-        const isMid = i >= bars * 0.6
-
-        return (
-          <div
-            key={i}
-            className="w-1.5 rounded-sm transition-all duration-75"
-            style={{
-              height: `${50 + (i / bars) * 50}%`,
-              background: active
-                ? isHot
-                  ? '#f87171'
-                  : isMid
-                  ? '#fbbf24'
-                  : '#34d399'
-                : 'rgba(51,65,85,0.5)',
-            }}
-          />
-        )
-      })}
-    </div>
-  )
+const STATUS = {
+  idle: { label: 'Idle', dot: 'bg-slate-500', text: 'text-slate-400' },
+  starting: { label: 'Starting…', dot: 'bg-sky-400 animate-pulse', text: 'text-sky-300' },
+  connecting: { label: 'Connecting…', dot: 'bg-sky-400 animate-pulse', text: 'text-sky-300' },
+  live: { label: 'Live', dot: 'bg-emerald-400 recording-glow', text: 'text-emerald-300' },
+  reconnecting: { label: 'Reconnecting…', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-300' },
+  paused: { label: 'Paused — slide media', dot: 'bg-amber-400', text: 'text-amber-300' },
+  inputLost: { label: 'Input lost', dot: 'bg-red-500 animate-pulse', text: 'text-red-300' },
 }
 
-// ── Connection status badge ────────────────────────────────────────────────
-function StatusBadge({ status }) {
-  const config = {
-    idle:         { color: 'text-slate-500', bg: 'bg-slate-800',   dot: 'bg-slate-600',  label: 'Idle' },
-    connecting:   { color: 'text-sky-400',   bg: 'bg-sky-900/30',  dot: 'bg-sky-400',    label: 'Connecting…' },
-    connected:    { color: 'text-emerald-400',bg: 'bg-emerald-900/30', dot: 'bg-success', label: 'Connected' },
-    error:        { color: 'text-red-400',   bg: 'bg-red-900/30',  dot: 'bg-red-400',    label: 'Error' },
-    disconnected: { color: 'text-slate-400', bg: 'bg-slate-800',   dot: 'bg-slate-500',  label: 'Disconnected' },
-  }
-
-  const cfg = config[status] || config.idle
-
-  return (
-    <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${cfg.bg} ${cfg.color}`}>
-      <div className={`h-1.5 w-1.5 rounded-full ${cfg.dot} ${status === 'connecting' ? 'animate-pulse' : ''}`} />
-      {cfg.label}
-    </div>
-  )
+const SERVER = {
+  checking: { label: 'Server…', dot: 'bg-slate-500', text: 'text-slate-500', title: 'Checking backend' },
+  ok: { label: 'Server', dot: 'bg-emerald-500', text: 'text-slate-500', title: 'Backend online' },
+  nokey: {
+    label: 'Key missing', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-400',
+    title: 'Backend is running but the Google service account key file was not found (see README)',
+  },
+  offline: {
+    label: 'Server offline', dot: 'bg-red-500 animate-pulse', text: 'text-red-400',
+    title: 'Backend offline — start the Python server',
+  },
 }
 
-// ── Main component ─────────────────────────────────────────────────────────
-export default function TranslationControls({
-  isStreaming,
-  connectionStatus,
-  audioLevel,
-  onStart,
-  onStop,
-}) {
+function InputMeter({ db, clipping, active }) {
+  // -60 dBFS … 0 dBFS; speech from a mixer should sit around -20 … -10.
+  const fraction = Math.min(1, Math.max(0, (db + 60) / 60))
   return (
-    <div className="flex flex-col items-center gap-4">
-      {/* Status badge */}
-      <StatusBadge status={isStreaming ? 'connected' : connectionStatus} />
-
-      {/* Start / Stop buttons */}
-      <div className="flex items-center gap-8">
-        {/* START */}
-        <button
-          id="btn-start-translation"
-          onClick={onStart}
-          disabled={isStreaming}
-          className="btn-start w-20 h-20 flex-col gap-1"
-          aria-label="Start Translation"
-          title="Start Translation"
-        >
-          {/* Play icon */}
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M8 5v14l11-7z" />
-          </svg>
-          <span className="text-[10px] font-bold uppercase tracking-wider">Start</span>
-        </button>
-
-        {/* STOP */}
-        <button
-          id="btn-stop-translation"
-          onClick={onStop}
-          disabled={!isStreaming}
-          className="btn-stop w-20 h-20 flex-col gap-1"
-          aria-label="Stop Translation"
-          title="Stop Translation"
-        >
-          {/* Stop icon */}
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M6 6h12v12H6z" />
-          </svg>
-          <span className="text-[10px] font-bold uppercase tracking-wider">Stop</span>
-        </button>
+    <div className="flex w-full items-center gap-1.5" title={`Input ${db.toFixed(0)} dBFS`}>
+      <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-3">
+        <div
+          className={`h-full rounded-full transition-[width] duration-100 ${
+            clipping ? 'bg-red-500' : fraction > 0.85 ? 'bg-amber-400' : 'bg-emerald-400'
+          }`}
+          style={{ width: `${active ? fraction * 100 : 0}%` }}
+        />
       </div>
+      <span className={`w-7 text-right text-[9px] font-semibold ${clipping ? 'text-red-400' : 'text-slate-600'}`}>
+        {clipping ? 'CLIP' : 'IN'}
+      </span>
+    </div>
+  )
+}
 
-      {/* VU meter */}
-      <div className="flex flex-col items-center gap-1.5">
-        <VUMeter level={audioLevel} />
-        <span className="text-[10px] text-slate-600 uppercase tracking-widest">
-          Input Level
+function RoundButton({ color, label, onClick, disabled, children }) {
+  const palette =
+    color === 'green'
+      ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-900/50 focus-visible:ring-emerald-300'
+      : 'bg-red-600 hover:bg-red-500 shadow-red-900/50 focus-visible:ring-red-300'
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={`${label} Translation`}
+        title={`${label} Translation`}
+        className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-white shadow-lg outline-none transition focus-visible:ring-2 active:scale-95 disabled:cursor-not-allowed disabled:opacity-35 disabled:shadow-none ${palette}`}
+      >
+        {children}
+      </button>
+      <span className="text-[10px] font-medium text-slate-400">{label}</span>
+    </div>
+  )
+}
+
+export default function TranslationControls({ status, backend, level, active, busy, onStart, onStop }) {
+  const cfg = STATUS[status] || STATUS.idle
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className={`flex items-center gap-1.5 font-semibold ${cfg.text}`}>
+          <span className={`h-2 w-2 rounded-full ${cfg.dot}`} />
+          {cfg.label}
+        </span>
+        <span
+          className={`flex items-center gap-1 ${SERVER[backend].text}`}
+          title={SERVER[backend].title}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${SERVER[backend].dot}`} />
+          {SERVER[backend].label}
         </span>
       </div>
+
+      <div className="flex items-start justify-center gap-6">
+        <RoundButton color="green" label="Start" onClick={onStart} disabled={active || busy}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+        </RoundButton>
+        <RoundButton color="red" label="Stop" onClick={onStop} disabled={!active}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="1.5" /></svg>
+        </RoundButton>
+      </div>
+
+      <InputMeter db={level.db} clipping={level.clipping} active={active} />
     </div>
   )
 }

@@ -1,104 +1,188 @@
 """
 main.py
 ───────
-FastAPI application entry point for the Live Translator backend.
+FastAPI entry point for the Live Translator backend.
 
-Why FastAPI over Flask + Flask-SocketIO?
-  FastAPI is chosen because:
-  1. Native async WebSocket support (no socketio eventlet/gevent monkey-patching).
-  2. asyncio.gather() for concurrent translations works naturally in the
-     same event loop with no thread-safety caveats.
-  3. Pydantic validation for any REST endpoints we may add (health check, etc.).
-  4. Starlette's WebSocket API maps 1-to-1 with our audio streaming model —
-     we receive raw binary frames, not JSON events, which is awkward in
-     Flask-SocketIO's message-type model.
+Why FastAPI rather than Flask + Flask-SocketIO?
+  • Native asyncio WebSockets carrying raw binary audio frames — no
+    Socket.IO event envelope and no eventlet/gevent monkey-patching.
+  • asyncio.gather() for the two concurrent translations lives in the same
+    event loop as the socket, with no thread-safety caveats.
+  • Starlette's FileResponse supports HTTP Range requests, which the
+    browser needs to seek inside slide videos.
 
-Run locally:
-  uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-
-Environment:
-  Set GOOGLE_APPLICATION_CREDENTIALS in .env (see .env.example).
+Run for the event (from backend/, venv active):
+  uvicorn main:app --host 127.0.0.1 --port 8000
 """
 
+import asyncio
+import logging
 import os
+import tempfile
 from pathlib import Path
 
-# ── Load .env before any Google client initialisation ───────────────────────
 from dotenv import load_dotenv
 
 _env_path = Path(__file__).parent / ".env"
 if _env_path.exists():
     load_dotenv(dotenv_path=_env_path)
-else:
-    print(
-        "[WARN] .env file not found — ensure GOOGLE_APPLICATION_CREDENTIALS "
-        "and GOOGLE_CLOUD_PROJECT are set in your environment."
-    )
 
-# Verify credentials are set before importing Google clients
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("main")
+
 _creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if not _creds:
     raise RuntimeError(
         "GOOGLE_APPLICATION_CREDENTIALS is not set. "
         "Copy .env.example to .env and fill in the path to your service account key."
     )
+_creds_path = (Path(__file__).parent / _creds).resolve() if not Path(_creds).is_absolute() else Path(_creds)
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_creds_path)
+if not _creds_path.exists():
+    log.warning("Service account key not found at %s - translation will fail until it is placed there.", _creds_path)
 
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request, WebSocket  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
-from websocket_handler import handle_translation_websocket
+import presentation_service as presentations  # noqa: E402
+from websocket_handler import handle_translation_websocket  # noqa: E402
 
-# ── FastAPI app ──────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Live Translator Backend",
     description="Real-time multilingual speech translation for live events",
-    version="1.0.0",
+    version="1.1.0",
 )
 
-# Allow the Vite dev server (port 5173) and any localhost origin.
-# This runs entirely on localhost — no public exposure.
+# Localhost-only event tool: allow the Vite dev/preview server origins.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
     ],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ── REST endpoints ────────────────────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def index():
+    """This is the API server; the operator UI is served by Vite on :5173."""
+    key = "found" if _creds_path.exists() else "MISSING - see README"
+    return f"""<!doctype html><meta charset="utf-8"><title>Live Translator backend</title>
+<body style="font-family:system-ui;background:#121212;color:#cbd5e1;padding:2rem">
+<h2>Live Translator backend is running</h2>
+<p>Google key: <b>{key}</b></p>
+<p>Open the app at <a style="color:#38bdf8" href="http://127.0.0.1:5173">http://127.0.0.1:5173</a>
+(start it with <code>npm run dev</code> in the frontend folder).</p>
+</body>"""
+
+
 @app.get("/health")
 async def health_check():
-    """Simple health probe used by the frontend to verify the backend is up."""
     return {
         "status": "ok",
-        "credentials_configured": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
+        "credentials_found": _creds_path.exists(),
         "project": os.getenv("GOOGLE_CLOUD_PROJECT", "not-set"),
     }
 
 
-# ── WebSocket endpoint ────────────────────────────────────────────────────────
+# ── Presentations ────────────────────────────────────────────────────────────
+@app.post("/api/presentations")
+async def upload_presentation(request: Request, filename: str = "presentation.pptx"):
+    """Body: raw .pptx bytes (Content-Type: application/octet-stream)."""
+    if not filename.lower().endswith(".pptx"):
+        raise HTTPException(400, "Only .pptx files are converted on the server; PDFs load directly.")
+
+    presentations.PRESENTATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(suffix=".pptx", dir=presentations.PRESENTATIONS_DIR)
+    tmp_path = Path(tmp_name)
+    received = 0
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > presentations.MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "Presentation file is too large.")
+                fh.write(chunk)
+        if received == 0:
+            raise HTTPException(400, "Empty upload.")
+
+        log.info("Converting presentation %s (%.1f MB)", filename, received / 1e6)
+        manifest = await asyncio.wait_for(
+            asyncio.to_thread(presentations.process_pptx, tmp_path, filename),
+            timeout=presentations.CONVERSION_TIMEOUT_S,
+        )
+        log.info("Presentation ready: %s via %s", manifest["id"], manifest["converter"])
+        return manifest
+    except presentations.PresentationError as exc:
+        raise HTTPException(422, str(exc))
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Presentation conversion timed out.")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _existing_file(path_factory, *args) -> Path:
+    try:
+        path = path_factory(*args)
+    except presentations.PresentationError as exc:
+        raise HTTPException(400, str(exc))
+    if not path.is_file():
+        raise HTTPException(404, "Not found")
+    return path
+
+
+@app.get("/api/presentations/{presentation_id}")
+async def presentation_manifest(presentation_id: str):
+    """Lets the frontend restore the loaded deck after a browser refresh."""
+    try:
+        manifest = presentations.load_manifest(presentation_id)
+    except presentations.PresentationError as exc:
+        raise HTTPException(400, str(exc))
+    if not manifest:
+        raise HTTPException(404, "Presentation not found")
+    return manifest
+
+
+@app.get("/api/presentations/{presentation_id}/slides.pdf")
+async def presentation_pdf(presentation_id: str):
+    return FileResponse(_existing_file(presentations.pdf_path, presentation_id), media_type="application/pdf")
+
+
+@app.get("/api/presentations/{presentation_id}/media/{name}")
+async def presentation_media(presentation_id: str, name: str):
+    path = _existing_file(presentations.media_path, presentation_id, name)
+    return FileResponse(path, media_type=presentations.MIME_TYPES.get(path.suffix.lower()))
+
+
+@app.delete("/api/presentations/{presentation_id}")
+async def remove_presentation(presentation_id: str):
+    try:
+        presentations.delete_presentation(presentation_id)
+    except presentations.PresentationError as exc:
+        raise HTTPException(400, str(exc))
+    return {"deleted": presentation_id}
+
+
+# ── Live translation ─────────────────────────────────────────────────────────
 @app.websocket("/ws/translate")
 async def translation_ws(websocket: WebSocket):
-    """
-    Primary WebSocket endpoint.
-    The frontend connects here when the operator clicks "Start Translation".
-    See websocket_handler.py for the full session lifecycle documentation.
-    """
     await handle_translation_websocket(websocket)
 
 
-# ── Dev entrypoint ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
 
-    host = os.getenv("HOST", "127.0.0.1")
-    port = int(os.getenv("PORT", "8000"))
-
-    print(f"[INFO] Starting Live Translator backend on ws://{host}:{port}")
-    uvicorn.run("main:app", host=host, port=port, reload=True)
+    uvicorn.run(
+        "main:app",
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+    )

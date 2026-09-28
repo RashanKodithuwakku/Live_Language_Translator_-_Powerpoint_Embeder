@@ -1,22 +1,17 @@
 /**
  * useWebSocket.js
  * ───────────────
- * Manages the persistent WebSocket connection to the backend translation
- * service. Exposes:
- *   - sendAudio(pcmBytes)   → sends a binary audio frame
- *   - sendCommand(text)     → sends a text control command ("STOP"/"START")
- *   - isConnected           → boolean connection state
- *   - lastMessage           → most recent parsed JSON message from backend
- *   - connectionStatus      → "idle" | "connecting" | "connected" | "error" | "disconnected"
+ * Connection to the backend translation socket.
  *
- * Reconnection strategy:
- *   The hook does NOT auto-reconnect after a deliberate operator Stop
- *   (i.e. after we close the socket ourselves). It DOES attempt to
- *   reconnect if the connection is dropped unexpectedly (network blip,
- *   backend restart), with an exponential back-off capped at 5 s.
+ * Reconnection: an operator Stop closes the socket deliberately and never
+ * reconnects. Any other close (backend restart, laptop sleep, network blip)
+ * reconnects forever with exponential back-off capped at 5 s. The backend
+ * starts a fresh Google streaming session on every new connection, so
+ * captions resume without the operator pressing Start again. Audio chunks
+ * produced while disconnected are dropped (live captions have no use for
+ * stale audio).
  *
- * The WebSocket URL is configurable via import.meta.env.VITE_WS_URL
- * (default: ws://127.0.0.1:8000/ws/translate).
+ * connectionStatus: 'idle' | 'connecting' | 'connected' | 'reconnecting'
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
@@ -26,118 +21,80 @@ const MAX_RECONNECT_DELAY_MS = 5000
 
 export function useWebSocket(onMessage) {
   const wsRef = useRef(null)
-  const [isConnected, setIsConnected] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState('idle') // idle | connecting | connected | error | disconnected
-  const [lastMessage, setLastMessage] = useState(null)
+  const [connectionStatus, setConnectionStatus] = useState('idle')
 
-  // Reconnection state
-  const reconnectAttemptRef = useRef(0)
-  const reconnectTimerRef = useRef(null)
-  const intentionalCloseRef = useRef(false) // set true when WE close the socket
+  const onMessageRef = useRef(onMessage)
+  onMessageRef.current = onMessage
+  const attemptRef = useRef(0)
+  const timerRef = useRef(null)
+  const shouldConnectRef = useRef(false)
+  const languageRef = useRef('')
 
-  // ── Internal helpers ────────────────────────────────────────────────────
-  const clearReconnectTimer = useCallback(() => {
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current)
-      reconnectTimerRef.current = null
-    }
-  }, [])
-
-  const connect = useCallback(() => {
-    // Don't open a second connection if already open
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
-
-    intentionalCloseRef.current = false
-    setConnectionStatus('connecting')
-
-    const ws = new WebSocket(WS_URL)
+  const open = useCallback(() => {
+    clearTimeout(timerRef.current)
+    const url = languageRef.current
+      ? `${WS_URL}?lang=${encodeURIComponent(languageRef.current)}`
+      : WS_URL
+    const ws = new WebSocket(url)
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
 
     ws.onopen = () => {
-      console.log('[WS] Connected to backend')
-      setIsConnected(true)
+      attemptRef.current = 0
       setConnectionStatus('connected')
-      reconnectAttemptRef.current = 0
     }
 
     ws.onmessage = (event) => {
       try {
-        const parsed = JSON.parse(event.data)
-        setLastMessage(parsed)
-        if (onMessage) onMessage(parsed)
-      } catch (err) {
-        console.warn('[WS] Could not parse message:', event.data)
+        onMessageRef.current?.(JSON.parse(event.data))
+      } catch {
+        console.warn('[WS] Ignoring non-JSON message')
       }
     }
 
-    ws.onerror = (err) => {
-      console.error('[WS] Error:', err)
-      setConnectionStatus('error')
+    ws.onclose = () => {
+      if (wsRef.current === ws) wsRef.current = null
+      if (!shouldConnectRef.current) return
+      const attempt = ++attemptRef.current
+      const delay = Math.min(500 * 2 ** (attempt - 1), MAX_RECONNECT_DELAY_MS)
+      setConnectionStatus('reconnecting')
+      timerRef.current = setTimeout(open, delay)
     }
+  }, [])
 
-    ws.onclose = (event) => {
-      console.log(`[WS] Closed (code=${event.code}, intentional=${intentionalCloseRef.current})`)
-      setIsConnected(false)
-      wsRef.current = null
-
-      if (intentionalCloseRef.current) {
-        setConnectionStatus('disconnected')
-        return
-      }
-
-      // Unexpected close — attempt reconnect with exponential back-off
-      setConnectionStatus('disconnected')
-      const attempt = ++reconnectAttemptRef.current
-      const delay = Math.min(500 * Math.pow(2, attempt - 1), MAX_RECONNECT_DELAY_MS)
-      console.log(`[WS] Reconnecting in ${delay}ms (attempt ${attempt})`)
-
-      reconnectTimerRef.current = setTimeout(() => {
-        connect()
-      }, delay)
-    }
-  }, [onMessage]) // eslint-disable-line react-hooks/exhaustive-deps
+  /** language: speaker's main language (e.g. 'si-LK'); kept across reconnects. */
+  const connect = useCallback((language = '') => {
+    shouldConnectRef.current = true
+    languageRef.current = language
+    const ws = wsRef.current
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+    attemptRef.current = 0
+    setConnectionStatus('connecting')
+    open()
+  }, [open])
 
   const disconnect = useCallback(() => {
-    clearReconnectTimer()
-    intentionalCloseRef.current = true
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'operator-stop')
-      wsRef.current = null
+    shouldConnectRef.current = false
+    clearTimeout(timerRef.current)
+    const ws = wsRef.current
+    wsRef.current = null
+    if (ws) {
+      if (ws.readyState === WebSocket.OPEN) ws.send('STOP')
+      ws.close(1000, 'operator-stop')
     }
-    setIsConnected(false)
     setConnectionStatus('idle')
-  }, [clearReconnectTimer])
-
-  // ── Public API ──────────────────────────────────────────────────────────
-  const sendAudio = useCallback((pcmBytes) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(pcmBytes)
-    }
   }, [])
 
-  const sendCommand = useCallback((text) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(text)
-    }
+  const sendAudio = useCallback((buffer) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(buffer)
   }, [])
 
-  // Clean up on unmount
-  useEffect(() => {
-    return () => {
-      clearReconnectTimer()
-      intentionalCloseRef.current = true
-      wsRef.current?.close()
-    }
-  }, [clearReconnectTimer])
+  useEffect(() => () => {
+    shouldConnectRef.current = false
+    clearTimeout(timerRef.current)
+    wsRef.current?.close()
+  }, [])
 
-  return {
-    connect,
-    disconnect,
-    sendAudio,
-    sendCommand,
-    isConnected,
-    connectionStatus,
-    lastMessage,
-  }
+  return { connect, disconnect, sendAudio, connectionStatus }
 }

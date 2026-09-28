@@ -1,195 +1,188 @@
 /**
  * useAudioStream.js
  * ─────────────────
- * Captures audio from the selected input device via getUserMedia,
- * processes it through a ScriptProcessorNode (AudioWorklet-compatible
- * fallback used for broad browser support in Chromium-based browsers
- * that ship with Electron or are run at events on a fixed browser version),
- * and streams raw LINEAR16 PCM chunks to the backend via a provided
- * sendAudio() callback.
+ * Captures the USB sound card (pinned by deviceId) and streams LINEAR16
+ * PCM, 16 kHz mono, in 100 ms binary chunks via `sendAudio`.
  *
- * Audio parameters (must match backend audio_processor.py constants):
- *   Sample rate:   16 000 Hz
- *   Channels:      1 (mono)
- *   Bit depth:     16-bit signed integer (int16 / LINEAR16)
- *   Chunk size:    4 096 samples ≈ 256 ms per chunk
+ * Signal path:
+ *   getUserMedia(deviceId: exact) → MediaStreamSource → AudioWorklet
+ *   (public/worklets/pcm-capture-processor.js) → port → sendAudio()
+ *                                              └→ Gain(0) → destination
+ * The zero-gain branch only keeps the worklet in the rendered graph; the
+ * mixer feed is never played back out of the laptop (no feedback loop).
  *
- * Why ScriptProcessorNode instead of AudioWorklet?
- *   ScriptProcessorNode is deprecated but still fully functional in all
- *   Chromium-based browsers (Chrome, Edge, Electron). AudioWorklet requires
- *   HTTPS or localhost AND a separate worklet JS file registered via
- *   AudioContext.audioWorklet.addModule(). For a localhost event tool with
- *   no build complexity requirements, ScriptProcessorNode is the pragmatic
- *   choice. If the project is ever migrated to HTTPS, replace with an
- *   AudioWorklet module.
+ * All browser DSP (echo cancellation, noise suppression, AGC) is disabled:
+ * the mixer already delivers a controlled line-level signal and AGC
+ * pumping hurts recognition. Cleanup happens in the backend.
  *
- * USB device auto-selection (see also: DeviceSelector.jsx):
- *   Pass `deviceId` from the DeviceSelector component. The hook pins
- *   getUserMedia to that exact deviceId so the USB sound card is used
- *   instead of the laptop's built-in mic.
+ * Gate: while `gated` is true (a slide video/audio is audible), chunks of
+ * digital silence are sent instead of the mic feed. The Google stream stays
+ * alive (it errors after ~10 s without audio) but never transcribes the
+ * video's soundtrack if it leaks back through the mixer.
+ *
+ * Recovery: if the USB device disappears mid-event (cable knocked out), the
+ * track ends; we report it and automatically re-open the same device as
+ * soon as it is plugged back in.
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 
-const SAMPLE_RATE = 16_000        // Hz — must match backend
-const BUFFER_SIZE = 4_096         // samples per chunk (~256 ms)
-const CHANNELS = 1                // mono
+const SAMPLE_RATE = 16_000
+const CHUNK_SAMPLES = 1_600 // 100 ms — Google's recommended streaming frame
+const WORKLET_URL = '/worklets/pcm-capture-processor.js'
+const CLIP_HOLD_MS = 1_500
 
-/**
- * Converts a Float32Array [-1, 1] to Int16Array (LINEAR16 PCM).
- * This matches what Google STT expects as LINEAR16 encoding.
- */
-function float32ToInt16(float32Array) {
-  const int16Array = new Int16Array(float32Array.length)
-  for (let i = 0; i < float32Array.length; i++) {
-    const clamped = Math.max(-1, Math.min(1, float32Array[i]))
-    int16Array[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff
+function describeGetUserMediaError(err) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+      return 'Microphone access is blocked. Click the lock icon in the address bar, allow Microphone, then press Start again.'
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'The selected audio input was not found. Check the USB sound card is plugged in, then press Refresh.'
+    case 'NotReadableError':
+      return 'The audio input is busy or unavailable. Close other apps using it (Zoom, Teams, OBS) and try again.'
+    default:
+      return err?.message || 'Could not open the audio input.'
   }
-  return int16Array
 }
 
 export function useAudioStream(sendAudio) {
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState(null)
-  const [audioLevel, setAudioLevel] = useState(0) // 0–100 for VU meter
+  const [level, setLevel] = useState({ db: -90, clipping: false })
 
-  const audioContextRef = useRef(null)
-  const streamRef = useRef(null)
-  const processorRef = useRef(null)
-  const sourceRef = useRef(null)
-  const analyserRef = useRef(null)
-  const animFrameRef = useRef(null)
+  const graphRef = useRef(null)
+  const wantStreamingRef = useRef(false)
+  const deviceIdRef = useRef(null)
+  const gatedRef = useRef(false)
+  const clipUntilRef = useRef(0)
+  const sendAudioRef = useRef(sendAudio)
+  sendAudioRef.current = sendAudio
 
-  // ── VU meter animation ──────────────────────────────────────────────────
-  const updateAudioLevel = useCallback(() => {
-    if (!analyserRef.current) return
-    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
-    analyserRef.current.getByteTimeDomainData(dataArray)
-
-    // RMS amplitude
-    let sum = 0
-    for (let i = 0; i < dataArray.length; i++) {
-      const val = (dataArray[i] - 128) / 128
-      sum += val * val
-    }
-    const rms = Math.sqrt(sum / dataArray.length)
-    setAudioLevel(Math.min(100, Math.round(rms * 300)))
-
-    animFrameRef.current = requestAnimationFrame(updateAudioLevel)
+  const teardownGraph = useCallback(() => {
+    const graph = graphRef.current
+    graphRef.current = null
+    if (!graph) return
+    graph.node.port.onmessage = null
+    graph.stream.getTracks().forEach((track) => {
+      track.onended = null
+      track.stop()
+    })
+    graph.context.close().catch(() => {})
   }, [])
 
-  // ── Start capturing ──────────────────────────────────────────────────────
-  const startStreaming = useCallback(async (deviceId) => {
+  const openGraph = useCallback(async (deviceId) => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        channelCount: { ideal: 1 },
+        sampleRate: { ideal: SAMPLE_RATE },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+      video: false,
+    })
+
+    const context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' })
     try {
-      setError(null)
-
-      // Build getUserMedia constraints, pinned to the chosen deviceId
-      const constraints = {
-        audio: deviceId
-          ? {
-              deviceId: { exact: deviceId },
-              channelCount: CHANNELS,
-              sampleRate: SAMPLE_RATE,
-              echoCancellation: false, // we handle noise in the backend
-              noiseSuppression: false, // same — let noisereduce handle it
-              autoGainControl: false,  // avoid gain fluctuation on speech
-            }
-          : {
-              channelCount: CHANNELS,
-              sampleRate: SAMPLE_RATE,
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-            },
-        video: false,
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints)
-      streamRef.current = stream
-
-      // AudioContext must be created / resumed after a user gesture
-      const audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE })
-      audioContextRef.current = audioCtx
-
-      const source = audioCtx.createMediaStreamSource(stream)
-      sourceRef.current = source
-
-      // Analyser for VU meter
-      const analyser = audioCtx.createAnalyser()
-      analyser.fftSize = 256
-      analyserRef.current = analyser
-      source.connect(analyser)
-
-      // ScriptProcessor for PCM extraction
-      // eslint-disable-next-line no-undef
-      const processor = audioCtx.createScriptProcessor(BUFFER_SIZE, CHANNELS, CHANNELS)
-      processorRef.current = processor
-
-      processor.onaudioprocess = (event) => {
-        const float32 = event.inputBuffer.getChannelData(0)
-        const int16 = float32ToInt16(float32)
-        // Send as raw ArrayBuffer (binary WebSocket frame)
-        sendAudio(int16.buffer)
-      }
-
-      source.connect(processor)
-      processor.connect(audioCtx.destination) // must be connected to stay active
-
-      setIsStreaming(true)
-      updateAudioLevel()
-
-      console.log('[Audio] Streaming started, device:', deviceId || 'default')
+      await context.audioWorklet.addModule(WORKLET_URL)
     } catch (err) {
-      console.error('[Audio] Failed to start streaming:', err)
-      setError(err.message || 'Microphone access denied')
+      stream.getTracks().forEach((t) => t.stop())
+      context.close().catch(() => {})
+      throw err
+    }
+
+    const source = context.createMediaStreamSource(stream)
+    const node = new AudioWorkletNode(context, 'pcm-capture-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+      processorOptions: { chunkSamples: CHUNK_SAMPLES },
+    })
+    const mute = context.createGain()
+    mute.gain.value = 0
+    source.connect(node).connect(mute).connect(context.destination)
+
+    node.port.onmessage = ({ data }) => {
+      const payload = gatedRef.current ? new ArrayBuffer(data.pcm.byteLength) : data.pcm
+      sendAudioRef.current(payload)
+
+      const now = performance.now()
+      if (data.peak >= 0.99) clipUntilRef.current = now + CLIP_HOLD_MS
+      setLevel({
+        db: data.rms > 0 ? Math.max(-90, 20 * Math.log10(data.rms)) : -90,
+        clipping: now < clipUntilRef.current,
+      })
+    }
+
+    const [track] = stream.getAudioTracks()
+    track.onended = () => {
+      if (!wantStreamingRef.current) return
+      teardownGraph()
       setIsStreaming(false)
+      setLevel({ db: -90, clipping: false })
+      setError('Audio input disconnected — reconnect the USB sound card. Capture will resume automatically.')
     }
-  }, [sendAudio, updateAudioLevel])
 
-  // ── Stop capturing ───────────────────────────────────────────────────────
+    if (context.state === 'suspended') await context.resume()
+    graphRef.current = { stream, context, node }
+  }, [teardownGraph])
+
+  const startStreaming = useCallback(async (deviceId) => {
+    setError(null)
+    wantStreamingRef.current = true
+    deviceIdRef.current = deviceId
+    teardownGraph()
+    try {
+      await openGraph(deviceId)
+      setIsStreaming(true)
+      return true
+    } catch (err) {
+      console.error('[Audio] Failed to start capture:', err)
+      wantStreamingRef.current = false
+      setError(describeGetUserMediaError(err))
+      setIsStreaming(false)
+      return false
+    }
+  }, [openGraph, teardownGraph])
+
   const stopStreaming = useCallback(() => {
-    if (animFrameRef.current) {
-      cancelAnimationFrame(animFrameRef.current)
-      animFrameRef.current = null
-    }
-
-    if (processorRef.current) {
-      processorRef.current.disconnect()
-      processorRef.current.onaudioprocess = null
-      processorRef.current = null
-    }
-
-    if (sourceRef.current) {
-      sourceRef.current.disconnect()
-      sourceRef.current = null
-    }
-
-    if (analyserRef.current) {
-      analyserRef.current.disconnect()
-      analyserRef.current = null
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop())
-      streamRef.current = null
-    }
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-      audioContextRef.current = null
-    }
-
+    wantStreamingRef.current = false
+    teardownGraph()
     setIsStreaming(false)
-    setAudioLevel(0)
-    console.log('[Audio] Streaming stopped')
+    setLevel({ db: -90, clipping: false })
+  }, [teardownGraph])
+
+  const setGated = useCallback((gated) => {
+    gatedRef.current = gated
   }, [])
 
-  // Clean up on unmount
+  // Auto-recover when the lost device is plugged back in.
   useEffect(() => {
-    return () => {
-      stopStreaming()
+    const onDeviceChange = async () => {
+      if (!wantStreamingRef.current || graphRef.current) return
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const back = devices.some((d) => d.kind === 'audioinput' && d.deviceId === deviceIdRef.current)
+      if (!back) return
+      try {
+        await openGraph(deviceIdRef.current)
+        setIsStreaming(true)
+        setError(null)
+      } catch (err) {
+        setError(describeGetUserMediaError(err))
+      }
     }
-  }, [stopStreaming])
+    navigator.mediaDevices.addEventListener('devicechange', onDeviceChange)
+    return () => navigator.mediaDevices.removeEventListener('devicechange', onDeviceChange)
+  }, [openGraph])
 
-  return { isStreaming, startStreaming, stopStreaming, error, audioLevel }
+  useEffect(() => () => {
+    wantStreamingRef.current = false
+    teardownGraph()
+  }, [teardownGraph])
+
+  return { isStreaming, startStreaming, stopStreaming, setGated, error, level }
 }

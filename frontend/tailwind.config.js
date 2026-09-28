@@ -1,48 +1,36 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
-  ],
+  content: ['./index.html', './src/**/*.{js,jsx}'],
   theme: {
     extend: {
       colors: {
-        // Soft dark theme palette — never pure black
-        'base': '#121212',         // Page background
-        'surface': '#1e293b',      // Card/panel background
-        'surface-2': '#263348',    // Slightly elevated surface
-        'surface-3': '#2d3f57',    // Hover states
-        'border': '#334155',       // Subtle borders
-        'primary': '#38bdf8',      // Sky blue accent
-        'primary-dim': '#0ea5e9',  // Darker accent variant
-        'success': '#34d399',      // Green for Start button
-        'danger': '#f87171',       // Red for Stop button
-        'sinhala': '#a78bfa',      // Purple — Line 1 Sinhala
-        'tamil': '#fbbf24',        // Amber — Line 2 Tamil
-        'original': '#94a3b8',     // Slate — Line 3 Original
+        // Soft dark palette — never pure black.
+        base: '#121212',
+        surface: '#1e293b',
+        'surface-2': '#243044',
+        'surface-3': '#2d3b52',
+        border: '#334155',
+        primary: '#38bdf8',
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
+        // Latin from Inter; Sinhala/Tamil glyphs fall through to Noto, then
+        // Windows' built-in Nirmala UI if the web fonts can't load.
+        subtitle: ['Inter', '"Noto Sans Sinhala"', '"Noto Sans Tamil"', '"Nirmala UI"', 'system-ui', 'sans-serif'],
       },
       animation: {
-        'fade-in': 'fadeIn 0.3s ease-in-out',
         'slide-up': 'slideUp 0.25s ease-out',
-        'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
-        'spin-slow': 'spin 3s linear infinite',
+        'pulse-soft': 'pulseSoft 1.6s ease-in-out infinite',
       },
       keyframes: {
-        fadeIn: {
-          '0%': { opacity: '0' },
-          '100%': { opacity: '1' },
-        },
         slideUp: {
-          '0%': { opacity: '0', transform: 'translateY(8px)' },
+          '0%': { opacity: '0', transform: 'translateY(6px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
         pulseSoft: {
           '0%, 100%': { opacity: '1' },
-          '50%': { opacity: '0.6' },
+          '50%': { opacity: '0.55' },
         },
       },
     },

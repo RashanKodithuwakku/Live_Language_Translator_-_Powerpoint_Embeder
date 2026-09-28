@@ -1,130 +1,116 @@
 /**
  * SubtitlePanel.jsx
  * ─────────────────
- * Displays exactly THREE lines of subtitle text.
+ * Exactly three lines, current sentence only — no history, no scrolling.
+ * A new final sentence replaces all three lines in place.
  *
- * CRITICAL BEHAVIOR (from spec):
- *   - No history, no scrolling. Only the current sentence is visible.
- *   - When a new sentence is finalized, all three lines replace in-place.
- *   - The previous sentence disappears completely.
+ *   Line 1  Sinhala translation   (largest)
+ *   Line 2  Tamil translation
+ *   Line 3  Original transcript, exactly as spoken (never translated)
  *
- * Line layout:
- *   Line 1 (top, most prominent)  — Sinhala translation
- *   Line 2 (middle)               — Tamil translation
- *   Line 3 (bottom, smaller)      — Original spoken text (never translated)
- *
- * Visual language:
- *   Line 1: purple (#a78bfa) — culturally neutral, visually distinct
- *   Line 2: amber (#fbbf24)  — warm, high-contrast against dark background
- *   Line 3: slate (#94a3b8)  — subdued, clearly secondary
- *
- * The `key` prop on each line forces a React re-mount on every update,
- * which triggers the CSS slide-up animation reliably even if the new
- * text happens to be identical to the previous sentence.
+ * Each line owns a fixed share of the panel height. Text starts as large as
+ * that row allows (for readability from the back of the hall) and shrinks
+ * only as much as needed for a long sentence to fit — it is never clipped
+ * and never scrolls.
  */
 
-import React, { useEffect, useRef } from 'react'
+import React, { useLayoutEffect, useRef } from 'react'
 
-// Language label pill
-function LangBadge({ label, color }) {
-  return (
-    <span
-      className="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest mr-3 flex-shrink-0 self-start mt-1"
-      style={{ background: `${color}22`, color, border: `1px solid ${color}44` }}
-    >
-      {label}
-    </span>
-  )
-}
+const LINES = [
+  { key: 'sinhala', tag: 'සිංහල', share: 1.2, maxPx: 60, minPx: 11, lineRatio: 0.62,
+    textClass: 'font-semibold text-slate-50', tagClass: 'text-violet-300 ring-violet-400/40' },
+  { key: 'tamil', tag: 'தமிழ்', share: 1.1, maxPx: 54, minPx: 11, lineRatio: 0.6,
+    textClass: 'font-semibold text-amber-200', tagClass: 'text-amber-300 ring-amber-400/40' },
+  { key: 'original', tag: 'Original', share: 0.7, maxPx: 30, minPx: 10, lineRatio: 0.6,
+    textClass: 'font-normal text-slate-400', tagClass: 'text-slate-400 ring-slate-500/40' },
+]
 
-function SubtitleLine({ text, color, label, animKey, size = 'normal', isPlaceholder = false }) {
+const GLYPH_SAFETY_PX = 4
+
+function FitText({ text, maxPx, minPx, lineRatio, className }) {
+  const boxRef = useRef(null)
+  const textRef = useRef(null)
+
+  useLayoutEffect(() => {
+    const box = boxRef.current
+    const el = textRef.current
+    if (!box || !el) return
+
+    // Sinhala/Tamil vowel signs reach above and below the line box.
+    const fits = () => el.scrollHeight <= box.clientHeight - GLYPH_SAFETY_PX
+
+    const fit = () => {
+      const ceiling = Math.min(maxPx, Math.max(minPx, box.clientHeight * lineRatio))
+      let lo = minPx
+      let hi = ceiling
+      el.style.fontSize = `${hi}px`
+      if (fits()) return
+      while (hi - lo > 0.5) {
+        const mid = (lo + hi) / 2
+        el.style.fontSize = `${mid}px`
+        if (fits()) lo = mid
+        else hi = mid
+      }
+      el.style.fontSize = `${lo}px`
+    }
+
+    fit()
+    // Refit when the panel resizes, and when the Noto web fonts finish
+    // loading (their glyphs are taller than the fallback font's).
+    const observer = new ResizeObserver(fit)
+    observer.observe(box)
+    document.fonts.addEventListener('loadingdone', fit)
+    document.fonts.ready.then(fit)
+    return () => {
+      observer.disconnect()
+      document.fonts.removeEventListener('loadingdone', fit)
+    }
+  }, [text, maxPx, minPx, lineRatio])
+
   return (
-    <div
-      key={animKey}
-      className={`flex items-start gap-1 ${isPlaceholder ? 'opacity-30' : 'subtitle-enter'}`}
-    >
-      <LangBadge label={label} color={color} />
-      <span
-        className={`leading-snug font-medium break-words flex-1 ${
-          size === 'small' ? 'text-sm text-slate-400' : ''
-        }`}
-        style={size !== 'small' ? { color, fontSize: size === 'large' ? '1.35rem' : '1.1rem' } : {}}
-      >
-        {isPlaceholder ? '—' : text || '—'}
-      </span>
+    <div ref={boxRef} className="flex h-full min-w-0 flex-1 items-center overflow-hidden">
+      <p ref={textRef} className={`w-full break-words leading-[1.3] ${className}`}>
+        {text}
+      </p>
     </div>
   )
 }
 
-export default function SubtitlePanel({ subtitles, isConnected, isStreaming }) {
-  const { sinhala, tamil, original, animKey } = subtitles
-
-  const hasContent = sinhala || tamil || original
+export default function SubtitlePanel({ subtitles }) {
+  const hasContent = Boolean(subtitles.sinhala || subtitles.tamil || subtitles.original)
 
   return (
-    <div className="flex flex-col gap-3 py-2">
-      {/* Status strip */}
-      <div className="flex items-center gap-2 mb-1">
-        <div className={`
-          h-2 w-2 rounded-full flex-shrink-0 transition-all duration-500
-          ${isStreaming ? 'bg-success recording-glow' : isConnected ? 'bg-primary animate-pulse-soft' : 'bg-border'}
-        `} />
-        <span className="text-[11px] font-medium tracking-wide text-slate-500 uppercase">
-          {isStreaming
-            ? 'Live — translating'
-            : isConnected
-            ? 'Connected — waiting for audio'
-            : 'Not connected'}
-        </span>
-      </div>
-
-      {/* Divider */}
-      <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
-
-      {/* Subtitle lines */}
-      <div className="flex flex-col gap-4">
-        {/* Line 1 — Sinhala */}
-        <SubtitleLine
-          key={`si-${animKey}`}
-          animKey={`si-${animKey}`}
-          text={sinhala}
-          label="සිං"
-          color="#a78bfa"
-          size="large"
-          isPlaceholder={!hasContent}
-        />
-
-        {/* Line 2 — Tamil */}
-        <SubtitleLine
-          key={`ta-${animKey}`}
-          animKey={`ta-${animKey}`}
-          text={tamil}
-          label="த"
-          color="#fbbf24"
-          size="normal"
-          isPlaceholder={!hasContent}
-        />
-
-        {/* Divider before original */}
-        <div className="h-px bg-gradient-to-r from-transparent via-border/60 to-transparent" />
-
-        {/* Line 3 — Original (never translated) */}
-        <SubtitleLine
-          key={`orig-${animKey}`}
-          animKey={`orig-${animKey}`}
-          text={original}
-          label="orig"
-          color="#94a3b8"
-          size="small"
-          isPlaceholder={!hasContent}
-        />
-      </div>
-
-      {!hasContent && !isStreaming && (
-        <p className="text-center text-xs text-slate-600 mt-2">
-          Subtitles will appear here when translation starts.
-        </p>
-      )}
+    <div
+      className="grid h-full min-h-0 gap-1 font-subtitle"
+      style={{ gridTemplateRows: LINES.map((l) => `${l.share}fr`).join(' ') }}
+      aria-live="polite"
+    >
+      {LINES.map((line, index) => (
+        <div
+          key={line.key}
+          className={`flex min-h-0 items-center gap-3 ${index === 2 ? 'border-t border-border/60 pt-1' : ''}`}
+        >
+          <span
+            className={`hidden w-[4.5rem] shrink-0 rounded-full px-2 py-0.5 text-center text-[11px] font-semibold ring-1 sm:inline-block ${line.tagClass}`}
+          >
+            {line.tag}
+          </span>
+          {hasContent ? (
+            <FitText
+              key={`${line.key}-${subtitles.seq}`}
+              text={subtitles[line.key]}
+              maxPx={line.maxPx}
+              minPx={line.minPx}
+              lineRatio={line.lineRatio}
+              className={`animate-slide-up ${line.textClass}`}
+            />
+          ) : (
+            <p className="truncate text-lg text-slate-600">
+              {index === 0 ? 'Live subtitles will appear here' : ''}
+            </p>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
