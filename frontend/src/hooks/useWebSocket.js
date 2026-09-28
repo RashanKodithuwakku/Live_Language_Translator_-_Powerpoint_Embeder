@@ -1,17 +1,6 @@
 /**
- * useWebSocket.js
- * ───────────────
- * Connection to the backend translation socket.
- *
- * Reconnection: an operator Stop closes the socket deliberately and never
- * reconnects. Any other close (backend restart, laptop sleep, network blip)
- * reconnects forever with exponential back-off capped at 5 s. The backend
- * starts a fresh Google streaming session on every new connection, so
- * captions resume without the operator pressing Start again. Audio chunks
- * produced while disconnected are dropped (live captions have no use for
- * stale audio).
- *
- * connectionStatus: 'idle' | 'connecting' | 'connected' | 'reconnecting'
+ * WebSocket to /ws/translate?lang=&profile=
+ * Auto-reconnects forever unless operator Stop.
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
@@ -29,13 +18,15 @@ export function useWebSocket(onMessage) {
   const timerRef = useRef(null)
   const shouldConnectRef = useRef(false)
   const languageRef = useRef('')
+  const profileRef = useRef('eco')
 
   const open = useCallback(() => {
     clearTimeout(timerRef.current)
-    const url = languageRef.current
-      ? `${WS_URL}?lang=${encodeURIComponent(languageRef.current)}`
-      : WS_URL
-    const ws = new WebSocket(url)
+    const params = new URLSearchParams()
+    if (languageRef.current) params.set('lang', languageRef.current)
+    if (profileRef.current) params.set('profile', profileRef.current)
+    const qs = params.toString()
+    const ws = new WebSocket(qs ? `${WS_URL}?${qs}` : WS_URL)
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
 
@@ -62,10 +53,10 @@ export function useWebSocket(onMessage) {
     }
   }, [])
 
-  /** language: speaker's main language (e.g. 'si-LK'); kept across reconnects. */
-  const connect = useCallback((language = '') => {
+  const connect = useCallback((language = '', profile = 'eco') => {
     shouldConnectRef.current = true
     languageRef.current = language
+    profileRef.current = profile
     const ws = wsRef.current
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
     attemptRef.current = 0
@@ -90,11 +81,23 @@ export function useWebSocket(onMessage) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(buffer)
   }, [])
 
+  const sendText = useCallback((text) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(text)
+  }, [])
+
+  // Live speaker switch; also used by any later auto-reconnect.
+  const setLanguage = useCallback((language) => {
+    languageRef.current = language
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(`LANG|${language}`)
+  }, [])
+
   useEffect(() => () => {
     shouldConnectRef.current = false
     clearTimeout(timerRef.current)
     wsRef.current?.close()
   }, [])
 
-  return { connect, disconnect, sendAudio, connectionStatus }
+  return { connect, disconnect, sendAudio, sendText, setLanguage, connectionStatus }
 }

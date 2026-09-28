@@ -1,0 +1,5 @@
+{
+  "stt_usd_per_minute": 0.024,
+  "translate_usd_per_million_chars": 20.0,
+  "notes": "Approximate Google list prices for Speech-to-Text v1 streaming and Translation v2 Basic. Edit to match your bill. Estimates only — not invoices."
+}

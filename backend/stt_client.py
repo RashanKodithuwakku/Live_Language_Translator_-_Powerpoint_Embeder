@@ -1,157 +1,148 @@
 """
-stt_client.py
-─────────────
-Google Cloud Speech-to-Text v1 streaming recognition with seamless,
-operator-invisible stream rotation.
+Google Cloud Speech-to-Text v1 streaming client.
 
-Threading model
-───────────────
-The google-cloud-speech `streaming_recognize` helper is a *blocking* gRPC
-bidirectional stream: it consumes a request generator and yields responses.
-Each stream therefore runs on its own daemon thread:
-
-    event loop ──feed()──► thread-safe audio queue ──► request generator ─┐
-                                                                          │ gRPC
-    event loop ◄─call_soon_threadsafe── response loop (worker thread) ◄───┘
-
-Nothing Google-related ever blocks the asyncio event loop, so WebSocket
-audio ingestion and caption delivery stay responsive at all times.
-
-Stream rotation (the ~305 s server-side limit)
-──────────────────────────────────────────────
-Google terminates a streaming session after ~305 s. We rotate *before*
-that happens, using overlapping streams so no audio is ever dropped:
-
-  1. A NEW stream is opened and from that instant receives all new audio.
-  2. The OLD stream is half-closed (its request generator ends). Google
-     then flushes any in-flight words as a final result and ends the
-     stream naturally — the sentence the speaker was in is not lost.
-
-Rotation timing:
-  • Endpoint rotation: the si-LK / ta-LK `default` models are slow to
-    decide that a sentence has ended (measured 14-29 s after the speaker
-    stopped). A level-based voice-activity detector watches the cleaned
-    audio; once the speaker has talked and then paused for
-    STT_ENDPOINT_SILENCE_MS, the stream is rotated so Google finalizes the
-    sentence right away (~1-2 s). A speaker who never pauses is cut at the
-    next short breath after STT_MAX_UTTERANCE_S, or unconditionally at
-    twice that.
-  • Soft rotation: right after a final result once the stream is older
-    than STT_SESSION_RESTART_INTERVAL (default 240 s). Finals coincide with
-    natural pauses in speech, so this almost never cuts a sentence.
-  • Hard rotation: on the next audio chunk once the stream is older than
-    STT_SESSION_RESTART_INTERVAL + 40 s (capped at 290 s), in case the
-    speaker talks for a long time without pausing.
-  • Error recovery: if a stream dies (network blip, audio timeout, quota),
-    the next audio chunk transparently opens a fresh stream. Repeated
-    immediate failures back off exponentially up to 10 s.
-
-Model choice
-────────────
-Per Google's v1 language-support table, si-LK and ta-LK are only served by
-the `default` and `command_and_search` models (NOT `latest_long`). We use
-`default` (continuous speech) unless STT_MODEL overrides it.
+Supports:
+  • Strategy 0 scout: one stream with alternative_language_codes
+  • Strategy 1/2: one stream per language, no alternatives
+  • Interim + final results with confidence / stability / word timings
+  • Seamless soft/hard rotation before Google's ~305 s limit
+  • Local endpointing (silence rotation) for slow si/ta models
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import os
 import queue
 import threading
 import time
-from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
-import numpy as np
 from google.cloud import speech
+
+import config
+from arbiter import Arbiter, ArbiterResult, StreamHypothesis, script_tag
 
 log = logging.getLogger("stt")
 
-SAMPLE_RATE_HZ = 16_000
-
-PRIMARY_LANGUAGE = os.getenv("STT_PRIMARY_LANGUAGE", "si-LK")
-ALTERNATIVE_LANGUAGES = [
-    code.strip()
-    for code in os.getenv("STT_ALTERNATIVE_LANGUAGES", "ta-LK,en-US").split(",")
-    if code.strip()
-]
-SUPPORTED_LANGUAGES = [PRIMARY_LANGUAGE] + [c for c in ALTERNATIVE_LANGUAGES if c != PRIMARY_LANGUAGE]
-STT_MODEL = os.getenv("STT_MODEL", "default")
-AUTO_PUNCTUATION = os.getenv("STT_AUTO_PUNCTUATION", "true").lower() == "true"
-
-SOFT_ROTATE_S = int(os.getenv("STT_SESSION_RESTART_INTERVAL", "240"))
-HARD_ROTATE_S = min(SOFT_ROTATE_S + 40, 290)
-MAX_RETRY_BACKOFF_S = 10
-HEALTHY_STREAM_S = 30
-
-ENDPOINT_SILENCE_S = int(os.getenv("STT_ENDPOINT_SILENCE_MS", "700")) / 1000
-MAX_UTTERANCE_S = float(os.getenv("STT_MAX_UTTERANCE_S", "15"))
-BREATH_SILENCE_S = 0.25
-MIN_SPEECH_S = 0.3
-# Speech must sit this far above the rolling noise floor (and above an
-# absolute floor, so digital silence with a -inf floor can't trigger it).
-VAD_MARGIN_DB = 12.0
-VAD_ABSOLUTE_MIN_DBFS = -55.0
-NOISE_FLOOR_WINDOW_S = 10.0
+FINAL_GATHER_S = config._float("STT_FINAL_GATHER_MS", 900) / 1000
 
 _speech_client: speech.SpeechClient | None = None
 _client_lock = threading.Lock()
+_phrases_cache: list | None = None
 
 
 def get_speech_client() -> speech.SpeechClient:
-    """Process-wide client. Credentials come from GOOGLE_APPLICATION_CREDENTIALS."""
     global _speech_client
     with _client_lock:
         if _speech_client is None:
             _speech_client = speech.SpeechClient()
+            log.info("Speech client ready (model default=%s)", config.STT_MODEL)
         return _speech_client
 
 
-def _build_streaming_config(primary: str) -> speech.StreamingRecognitionConfig:
+def _load_phrases() -> list:
+    global _phrases_cache
+    if _phrases_cache is not None:
+        return _phrases_cache
+    path: Path = config.PHRASES_PATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        phrases = data.get("phrases", data if isinstance(data, list) else [])
+        _phrases_cache = [
+            speech.SpeechContext(
+                phrases=[p["value"] if isinstance(p, dict) else str(p)],
+                boost=float(p.get("boost", 10) if isinstance(p, dict) else 10),
+            )
+            for p in phrases
+            if (p.get("value") if isinstance(p, dict) else p)
+        ]
+        log.info("Loaded %d speech_contexts from %s", len(_phrases_cache), path.name)
+    except Exception as exc:
+        log.warning("phrases.json not loaded (%s) — continuing without hints", exc)
+        _phrases_cache = []
+    return _phrases_cache
+
+
+def _build_config(primary: str, use_alternatives: bool) -> speech.StreamingRecognitionConfig:
+    alts = []
+    if use_alternatives:
+        # Include the default primary so e.g. a Tamil or English speaker
+        # setting still has Sinhala as a fallback.
+        pool = [config.PRIMARY_LANGUAGE, *config.ALTERNATIVE_LANGUAGES]
+        prefix = primary.split("-")[0].lower()
+        for c in pool:
+            if c.split("-")[0].lower() != prefix and c not in alts:
+                alts.append(c)
+    # si-LK / ta-* only support default / command_and_search in v1.
+    model = config.STT_MODEL
+    log.debug("STT config primary=%s model=%s alts=%s", primary, model, alts)
+    kwargs = dict(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=config.SAMPLE_RATE_HZ,
+        audio_channel_count=1,
+        language_code=primary,
+        alternative_language_codes=alts,
+        enable_automatic_punctuation=config.AUTO_PUNCTUATION,
+        model=model,
+        speech_contexts=_load_phrases(),
+    )
+    if config.ENABLE_WORD_CONFIDENCE:
+        kwargs["enable_word_confidence"] = True
+    if config.ENABLE_WORD_TIME_OFFSETS:
+        kwargs["enable_word_time_offsets"] = True
     return speech.StreamingRecognitionConfig(
-        config=speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=SAMPLE_RATE_HZ,
-            audio_channel_count=1,
-            language_code=primary,
-            alternative_language_codes=[c for c in SUPPORTED_LANGUAGES if c != primary],
-            enable_automatic_punctuation=AUTO_PUNCTUATION,
-            model=STT_MODEL,
-        ),
-        # Interim results keep Google's endpointing responsive; they are
-        # consumed here and never forwarded to the audience.
+        config=speech.RecognitionConfig(**kwargs),
         interim_results=True,
         single_utterance=False,
     )
 
 
-@dataclass(frozen=True)
-class FinalTranscript:
+def _duration_s(d) -> float:
+    # proto-plus exposes Duration fields as datetime.timedelta.
+    if d is None:
+        return 0.0
+    if hasattr(d, "total_seconds"):
+        return float(d.total_seconds())
+    return float(getattr(d, "seconds", 0)) + float(getattr(d, "nanos", 0)) / 1e9
+
+
+@dataclass
+class TranscriptEvent:
     text: str
     language_code: str
+    is_final: bool
+    confidence: float = 0.0
+    stability: float = 0.0
+    words: list[dict] = field(default_factory=list)
+    stream_lang: str = ""
+    t_google_first: float = 0.0  # monotonic
+
+
+# Keep old name for any residual imports
+FinalTranscript = TranscriptEvent
 
 
 class _RecognizeStream:
-    """One Google streaming session running on a dedicated worker thread."""
-
     _ids = 0
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, owner: "STTSession"):
+    def __init__(self, loop: asyncio.AbstractEventLoop, owner: "LangStream", primary: str, use_alts: bool):
         _RecognizeStream._ids += 1
         self.id = _RecognizeStream._ids
         self.started_at = time.monotonic()
         self._loop = loop
         self._owner = owner
+        self._primary = primary
+        self._use_alts = use_alts
         self._audio: queue.Queue[bytes | None] = queue.Queue()
         self._closed = False
         self.finished = False
-        self._thread = threading.Thread(
-            target=self._run, name=f"stt-stream-{self.id}", daemon=True
-        )
+        self.audio_seconds = 0.0
+        self._thread = threading.Thread(target=self._run, name=f"stt-{primary}-{self.id}", daemon=True)
         self._thread.start()
-        log.info("STT stream #%d opened", self.id)
+        log.info("STT stream #%d opened (%s, alts=%s)", self.id, primary, use_alts)
 
     @property
     def age(self) -> float:
@@ -164,9 +155,9 @@ class _RecognizeStream:
     def feed(self, chunk: bytes) -> None:
         if self.usable:
             self._audio.put(chunk)
+            self.audio_seconds += len(chunk) / (2 * config.SAMPLE_RATE_HZ)
 
     def close(self) -> None:
-        """Half-close: Google flushes pending words as a final, then ends."""
         if not self._closed:
             self._closed = True
             self._audio.put(None)
@@ -181,142 +172,325 @@ class _RecognizeStream:
     def _run(self) -> None:
         try:
             responses = get_speech_client().streaming_recognize(
-                config=_build_streaming_config(self._owner.primary_language),
+                config=_build_config(self._primary, self._use_alts),
                 requests=self._requests(),
             )
+            first_at = 0.0
             for response in responses:
+                interim_parts: list[str] = []
+                interim_first = None
                 for result in response.results:
-                    if not result.is_final or not result.alternatives:
+                    if not result.alternatives:
                         continue
-                    text = result.alternatives[0].transcript.strip()
+                    alt = result.alternatives[0]
+                    text = (alt.transcript or "").strip()
                     if not text:
                         continue
-                    final = FinalTranscript(
+                    if not first_at:
+                        first_at = time.monotonic()
+                    if not result.is_final:
+                        # Google splits one interim into a stable head plus
+                        # unstable tail results; show them as one line.
+                        interim_parts.append(text)
+                        interim_first = interim_first or result
+                        continue
+                    words = [
+                        {
+                            "word": w.word,
+                            "start": _duration_s(w.start_time),
+                            "end": _duration_s(w.end_time),
+                            "conf": float(getattr(w, "confidence", 0) or 0),
+                        }
+                        for w in (getattr(alt, "words", None) or [])
+                    ]
+                    self._emit(TranscriptEvent(
                         text=text,
-                        language_code=result.language_code or self._owner.primary_language,
-                    )
-                    self._loop.call_soon_threadsafe(self._owner._on_final, self, final)
-            log.info("STT stream #%d ended after %.0fs", self.id, self.age)
-        except Exception as exc:  # gRPC errors surface here
+                        language_code=result.language_code or self._primary,
+                        is_final=True,
+                        confidence=float(getattr(alt, "confidence", 0) or 0),
+                        words=words,
+                        stream_lang=self._primary,
+                        t_google_first=first_at,
+                    ))
+                if interim_parts:
+                    self._emit(TranscriptEvent(
+                        text=" ".join(interim_parts),
+                        language_code=interim_first.language_code or self._primary,
+                        is_final=False,
+                        stability=float(getattr(interim_first, "stability", 0) or 0),
+                        stream_lang=self._primary,
+                        t_google_first=first_at,
+                    ))
+            log.info("STT stream #%d ended after %.0fs (%.1fs audio)", self.id, self.age, self.audio_seconds)
+        except Exception as exc:
             log.warning("STT stream #%d error after %.0fs: %s", self.id, self.age, exc)
-            self._loop.call_soon_threadsafe(self._owner._on_stream_error, self, str(exc))
+            self._loop.call_soon_threadsafe(self._owner._on_error, self, str(exc))
         finally:
             self.finished = True
             self._closed = True
 
+    def _emit(self, event: TranscriptEvent) -> None:
+        self._loop.call_soon_threadsafe(self._owner._on_result, self, event)
 
-class STTSession:
-    """
-    Continuous recognition for one translation session.
 
-    Usage (from the event loop):
-        stt = STTSession("si-LK")      # primary language; others are alternatives
-        stt.feed(pcm_bytes)            # every ~100 ms
-        final = await stt.results.get()
-        stt.close()
-    """
+class LangStream:
+    """One language's continuous recogniser with rotation + local endpointing."""
 
-    def __init__(self, primary_language: str | None = None) -> None:
-        self.primary_language = (
-            primary_language if primary_language in SUPPORTED_LANGUAGES else PRIMARY_LANGUAGE
-        )
+    def __init__(self, language: str, use_alternatives: bool = False) -> None:
+        self.language = language
+        self.use_alternatives = use_alternatives
         self._loop = asyncio.get_running_loop()
         self._current: _RecognizeStream | None = None
         self._closed = False
-        self.results: asyncio.Queue[FinalTranscript] = asyncio.Queue()
+        self.events: asyncio.Queue[TranscriptEvent] = asyncio.Queue()
         self.errors: asyncio.Queue[str] = asyncio.Queue()
+        self._on_event = None  # optional fan-in callback(event)
+        self._on_error_cb = None
         self._last_error_at = 0.0
-        self._consecutive_failures = 0
-        self._levels: deque[float] = deque()
-        self._reset_utterance()
+        self._failures = 0
+        self._silence_s = 0.0
+        self._speech_s = 0.0
+        self._utterance_s = 0.0
+        self.total_audio_s = 0.0
+
+    def open(self) -> None:
+        if self._closed:
+            return
+        self.total_audio_s = 0.0
+        if self._current is None or not self._current.usable:
+            self._rotate()
 
     def feed(self, pcm: bytes) -> None:
         if self._closed:
             return
         stream = self._current
         if stream is None or not stream.usable:
-            # Exponential back-off (1 s → 10 s) so a persistent error (bad
-            # credentials, quota) doesn't open a gRPC stream every 100 ms.
-            backoff = min(MAX_RETRY_BACKOFF_S, 2 ** max(0, self._consecutive_failures - 1))
+            backoff = min(10, 2 ** max(0, self._failures - 1))
             if time.monotonic() - self._last_error_at < backoff:
                 return
             stream = self._rotate()
-        elif stream.age >= HARD_ROTATE_S:
+        elif stream.age >= config.HARD_ROTATE_S:
             stream = self._rotate()
         stream.feed(pcm)
-        if self._update_vad(pcm):
+        self.total_audio_s += len(pcm) / (2 * config.SAMPLE_RATE_HZ)
+        if self._endpoint(pcm):
             self._rotate()
 
-    # ── voice-activity endpointing ──────────────────────────────────────────
-    def _reset_utterance(self) -> None:
-        self._speech_s = 0.0
-        self._silence_s = 0.0
-        self._utterance_s = 0.0
+    def close(self) -> None:
+        self._closed = True
+        if self._current:
+            self.total_audio_s = self._current.audio_seconds  # last stream accounting elsewhere
+            self._current.close()
+            self._current = None
 
-    def _update_vad(self, pcm: bytes) -> bool:
-        """Track speech/pause for this chunk; True = end the utterance now."""
+    def half_close(self) -> None:
+        """End current Google stream (finalize) without marking session closed."""
+        if self._current:
+            self._current.close()
+            self._current = None
+        self._speech_s = self._silence_s = self._utterance_s = 0.0
+
+    def _rotate(self) -> _RecognizeStream:
+        old = self._current
+        self._current = _RecognizeStream(self._loop, self, self.language, self.use_alternatives)
+        self._speech_s = self._silence_s = self._utterance_s = 0.0
+        if old:
+            old.close()
+        return self._current
+
+    def _endpoint(self, pcm: bytes) -> bool:
+        import numpy as np
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
         if samples.size == 0:
             return False
-        duration = samples.size / SAMPLE_RATE_HZ
-        rms = float(np.sqrt(np.mean(samples * samples)))
+        duration = samples.size / config.SAMPLE_RATE_HZ
+        rms = float((samples * samples).mean() ** 0.5)
         level = 20 * np.log10(rms / 32768) if rms > 0 else -120.0
-
-        self._levels.append(level)
-        while len(self._levels) * duration > NOISE_FLOOR_WINDOW_S:
-            self._levels.popleft()
-        threshold = max(min(self._levels) + VAD_MARGIN_DB, VAD_ABSOLUTE_MIN_DBFS)
-
-        if level > threshold:
+        speaking = level > -45
+        if speaking:
             self._speech_s += duration
             self._silence_s = 0.0
         else:
             self._silence_s += duration
         if self._speech_s > 0:
             self._utterance_s += duration
-        if self._speech_s < MIN_SPEECH_S:
-            if self._silence_s >= ENDPOINT_SILENCE_S:
-                self._reset_utterance()  # a click or cough, not speech
+        if self._speech_s < 0.25:
             return False
-
+        silence_need = config.ENDPOINT_SILENCE_MS / 1000
         return (
-            self._silence_s >= ENDPOINT_SILENCE_S
-            or (self._utterance_s >= MAX_UTTERANCE_S and self._silence_s >= BREATH_SILENCE_S)
-            or self._utterance_s >= 2 * MAX_UTTERANCE_S
+            self._silence_s >= silence_need
+            or (self._utterance_s >= config.MAX_UTTERANCE_S and self._silence_s >= 0.25)
+            or self._utterance_s >= 2 * config.MAX_UTTERANCE_S
         )
 
-    def close(self) -> None:
-        self._closed = True
-        if self._current:
-            self._current.close()
-            self._current = None
-
-    def _rotate(self) -> _RecognizeStream:
-        old = self._current
-        self._current = _RecognizeStream(self._loop, self)
-        self._reset_utterance()
-        if old:
-            old.close()
-        return self._current
-
-    # ── callbacks (run on the event loop via call_soon_threadsafe) ──────────
-    def _on_final(self, stream: _RecognizeStream, final: FinalTranscript) -> None:
+    def _on_result(self, stream: _RecognizeStream, event: TranscriptEvent) -> None:
         if self._closed:
             return
-        self.results.put_nowait(final)
-        if stream is self._current:
-            if stream.age >= SOFT_ROTATE_S:
+        self.events.put_nowait(event)
+        if self._on_event:
+            self._on_event(event)
+        if event.is_final and stream is self._current:
+            if stream.age >= config.SOFT_ROTATE_S:
                 self._rotate()
             elif self._silence_s > 0:
-                # Google endpointed on its own during this pause.
-                self._reset_utterance()
+                self._speech_s = self._silence_s = self._utterance_s = 0.0
 
-    def _on_stream_error(self, stream: _RecognizeStream, message: str) -> None:
+    def _on_error(self, stream: _RecognizeStream, message: str) -> None:
         if self._closed or stream is not self._current:
             return
-        if stream.age > HEALTHY_STREAM_S:
-            self._consecutive_failures = 0
-        self._consecutive_failures += 1
+        if stream.age > 30:
+            self._failures = 0
+        self._failures += 1
         self._last_error_at = time.monotonic()
         self._current = None
         self.errors.put_nowait(message)
+        if self._on_error_cb:
+            self._on_error_cb(message)
+
+
+class MultiLangRecognizer:
+    """
+    Fans gated PCM to one or more LangStreams and merges via Arbiter.
+    Streams are opened/closed by the session gate (not on every chunk).
+    """
+
+    def __init__(self, strategy: int | None = None, scout_lang: str | None = None) -> None:
+        self.strategy = config.ARBITER_STRATEGY if strategy is None else strategy
+        self.arbiter = Arbiter(self.strategy, preferred=scout_lang or config.PRIMARY_LANGUAGE)
+        self.results: asyncio.Queue[ArbiterResult] = asyncio.Queue()
+        self.errors: asyncio.Queue[str] = asyncio.Queue()
+        self.debug: dict = {}
+        self._open = False
+        self._closed = False
+        self._task: asyncio.Task | None = None
+
+        self._inbox: asyncio.Queue[TranscriptEvent | str] = asyncio.Queue()
+        if self.strategy == 0:
+            lang = scout_lang or config.PRIMARY_LANGUAGE
+            self.streams = [LangStream(lang, use_alternatives=True)]
+        else:
+            langs = list(config.PARALLEL_LANGUAGES)
+            self.streams = [LangStream(lang, use_alternatives=False) for lang in langs]
+
+        for s in self.streams:
+            s._on_event = lambda ev: self._inbox.put_nowait(ev)
+            s._on_error_cb = lambda msg: self._inbox.put_nowait(msg)
+
+        self._latest: dict[str, StreamHypothesis] = {}
+
+    def open_streams(self) -> None:
+        if self._closed:
+            return
+        for s in self.streams:
+            s._closed = False
+            s.open()
+        self._open = True
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._merge_loop(), name="arbiter-merge")
+
+    def close_streams(self) -> None:
+        """Half-close Google streams (finalize) but keep merge loop for finals."""
+        for s in self.streams:
+            s.half_close()
+        self._open = False
+
+    def feed(self, pcm: bytes) -> None:
+        if not self._open or self._closed:
+            return
+        for s in self.streams:
+            s.feed(pcm)
+
+    def close(self) -> None:
+        self._closed = True
+        self._open = False
+        for s in self.streams:
+            s.close()
+        if self._task:
+            self._task.cancel()
+
+    def set_language(self, lang: str) -> None:
+        """Switch the speaker language mid-session; takes effect on the next utterance."""
+        self.arbiter.set_preferred(lang)
+        if self.strategy == 0:
+            stream = self.streams[0]
+            if stream.language != lang:
+                stream.language = lang
+                # Finalise the in-flight utterance; the next feed/open
+                # starts a Google stream configured for the new language.
+                stream.half_close()
+        log.info("Speaker language -> %s (strategy %d)", lang, self.strategy)
+
+    def audio_seconds_by_lang(self) -> dict[str, float]:
+        return {s.language: s.total_audio_s for s in self.streams}
+
+    def _flush_finals(self) -> None:
+        pending, self._pending = self._pending, {}
+        self._deadline = None
+        chosen = self.arbiter.choose(list(pending.values()))
+        if chosen:
+            chosen.is_final = True
+            self.debug = chosen.debug
+            self.results.put_nowait(chosen)
+
+    async def _merge_loop(self) -> None:
+        # Parallel streams finalize the same utterance at slightly different
+        # times; collect their finals and emit one arbitrated caption.
+        self._pending: dict[str, StreamHypothesis] = {}
+        self._deadline: float | None = None
+        while not self._closed:
+            timeout = None
+            if self._deadline is not None:
+                timeout = max(0.0, self._deadline - time.monotonic())
+            try:
+                item = await asyncio.wait_for(self._inbox.get(), timeout)
+            except asyncio.TimeoutError:
+                self._flush_finals()
+                continue
+            if isinstance(item, str):
+                self.errors.put_nowait(item)
+                continue
+            event: TranscriptEvent = item
+            key = event.stream_lang or event.language_code
+            hyp = StreamHypothesis(
+                language=event.language_code or event.stream_lang,
+                text=event.text,
+                is_final=event.is_final,
+                confidence=event.confidence,
+                stability=event.stability,
+                words=event.words,
+            )
+            if event.is_final:
+                self._pending[key] = hyp
+                self._latest.pop(key, None)
+                if self._deadline is None:
+                    self._deadline = time.monotonic() + FINAL_GATHER_S
+                if len(self._pending) >= len(self.streams):
+                    self._flush_finals()
+                continue
+
+            if key in self._pending:
+                # That stream is already on the next utterance.
+                self._flush_finals()
+            self._latest[key] = hyp
+            if self._pending:
+                continue
+            if len(self.streams) > 1 and self.arbiter.preferred_hyp(list(self._latest.values())) is None:
+                if any(
+                    script_tag(s.language) == script_tag(self.arbiter.preferred or "")
+                    and s.language not in self._latest
+                    for s in self.streams
+                ):
+                    continue  # wait for the preferred stream's interim
+            chosen = self.arbiter.choose(list(self._latest.values()))
+            if chosen:
+                chosen.is_final = False
+                self.debug = chosen.debug
+                self.results.put_nowait(chosen)
+
+
+# Back-compat alias used by older imports
+class STTSession(LangStream):
+    def __init__(self, primary_language: str | None = None) -> None:
+        super().__init__(primary_language or config.PRIMARY_LANGUAGE, use_alternatives=True)
+        self.primary_language = self.language
+        self.results = self.events

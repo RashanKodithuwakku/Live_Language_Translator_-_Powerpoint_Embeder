@@ -1,8 +1,8 @@
 /**
  * DeviceSelector.jsx
  * ──────────────────
- * Compact operator control for the mixer feed (USB sound card) plus the
- * slide-media audio options. Deliberately small so the audience's eyes stay
+ * Compact operator control: one input dropdown (auto-picks mixer, then
+ * Bluetooth/headset, then laptop mic) plus the slide-media audio options. Deliberately small so the audience's eyes stay
  * on the slides and subtitles, but the active input is always spelled out
  * in one line — the wrong input is the biggest live failure risk.
  */
@@ -20,6 +20,17 @@ const SPEAKER_LANGUAGES = [
   { code: 'en-US', label: 'Speaker: English' },
 ]
 
+const PROFILES = [
+  { code: 'eco', label: 'Profile: ECO (save credit)' },
+  { code: 'event', label: 'Profile: EVENT (best quality)' },
+]
+
+const KIND = {
+  mixer: { tag: 'Mixer', status: 'Mixer / line input', color: 'text-emerald-400', dot: 'bg-emerald-400' },
+  headset: { tag: 'Bluetooth', status: 'Bluetooth / headset mic', color: 'text-sky-400', dot: 'bg-sky-400' },
+  mic: { tag: 'Mic', status: 'Laptop mic', color: 'text-sky-400', dot: 'bg-sky-400' },
+}
+
 export default function DeviceSelector({
   inputs,
   outputs,
@@ -31,6 +42,8 @@ export default function DeviceSelector({
   onRefresh,
   speakerLanguage,
   onSpeakerLanguageChange,
+  profile,
+  onProfileChange,
   mediaSinkId,
   onMediaSinkChange,
   pauseDuringMedia,
@@ -41,11 +54,22 @@ export default function DeviceSelector({
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <select
-        value={speakerLanguage}
-        onChange={(e) => onSpeakerLanguageChange(e.target.value)}
+        value={profile}
+        onChange={(e) => onProfileChange(e.target.value)}
         disabled={locked}
         className={selectClass}
-        title={locked ? 'Stop translation to change the speaker language' : "Speaker's main language (the other two are still detected)"}
+        title="ECO for daily testing · EVENT for rehearsal and Oct 5–6"
+        aria-label="Operating profile"
+      >
+        {PROFILES.map((p) => (
+          <option key={p.code} value={p.code}>{p.label}</option>
+        ))}
+      </select>
+      <select
+        value={speakerLanguage}
+        onChange={(e) => onSpeakerLanguageChange(e.target.value)}
+        className={selectClass}
+        title="Main language of the current speaker — can be changed while live"
         aria-label="Speaker language"
       >
         {SPEAKER_LANGUAGES.map((l) => (
@@ -73,7 +97,7 @@ export default function DeviceSelector({
               {inputs.length === 0 && <option value="">No inputs found</option>}
               {inputs.map((d) => (
                 <option key={d.deviceId} value={d.deviceId}>
-                  {d.isUSB ? '[USB] ' : ''}{d.label}
+                  {KIND[d.kind].tag} · {d.label}
                 </option>
               ))}
             </select>
@@ -89,12 +113,9 @@ export default function DeviceSelector({
             </button>
           </div>
           {selected && (
-            <p
-              className={`flex items-center gap-1 truncate text-[10px] ${selected.isUSB ? 'text-emerald-400' : 'text-amber-400'}`}
-              title={selected.label}
-            >
-              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${selected.isUSB ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-              {selected.isUSB ? 'USB sound card active' : 'Not a USB device — check selection'}
+            <p className={`flex items-center gap-1 truncate text-[10px] ${KIND[selected.kind].color}`} title={selected.label}>
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND[selected.kind].dot}`} />
+              {KIND[selected.kind].status}
             </p>
           )}
         </>

@@ -1,0 +1,12 @@
+{
+  "phrases": [
+    {"value": "Sri Lanka", "boost": 15},
+    {"value": "Colombo", "boost": 12},
+    {"value": "ශ්‍රී ලංකාව", "boost": 15},
+    {"value": "කොළඹ", "boost": 12},
+    {"value": "இலங்கை", "boost": 15},
+    {"value": "கொழும்பு", "boost": 12},
+    {"value": "PowerPoint", "boost": 10},
+    {"value": "Live Translator", "boost": 12}
+  ]
+}

@@ -51,11 +51,14 @@ from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
 import presentation_service as presentations  # noqa: E402
 from websocket_handler import handle_translation_websocket  # noqa: E402
+import config  # noqa: E402
+from translation_client import warm_client  # noqa: E402
+from usage_ledger import ledger  # noqa: E402
 
 app = FastAPI(
     title="Live Translator Backend",
     description="Real-time multilingual speech translation for live events",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 # Localhost-only event tool: allow the Vite dev/preview server origins.
@@ -85,13 +88,33 @@ async def index():
 </body>"""
 
 
+@app.on_event("startup")
+async def _startup():
+    log.info("Runtime: %s", config.summary())
+    if not config.is_cache_mode():
+        await warm_client()
+
+
 @app.get("/health")
 async def health_check():
     return {
         "status": "ok",
         "credentials_found": _creds_path.exists(),
         "project": os.getenv("GOOGLE_CLOUD_PROJECT", "not-set"),
+        **config.summary(),
+        "usage": ledger.snapshot(),
     }
+
+
+@app.get("/api/usage")
+async def usage():
+    return ledger.snapshot()
+
+
+@app.post("/api/budget/override")
+async def budget_override():
+    ledger.activate_override(4.0)
+    return {"ok": True, "usage": ledger.snapshot()}
 
 
 # ── Presentations ────────────────────────────────────────────────────────────

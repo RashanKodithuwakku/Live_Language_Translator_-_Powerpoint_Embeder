@@ -1,12 +1,8 @@
 /**
- * TranslationControls.jsx
- * ───────────────────────
- * Compact Start/Stop buttons, session status and a slim input meter.
- * Buttons are fixed-size circles (shrink-0) so they never squash when the
- * panel is short.
+ * Compact operator controls: Start/Stop, status, profile chip, meter.
  */
 
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 
 const STATUS = {
   idle: { label: 'Idle', dot: 'bg-slate-500', text: 'text-slate-400' },
@@ -23,19 +19,18 @@ const SERVER = {
   ok: { label: 'Server', dot: 'bg-emerald-500', text: 'text-slate-500', title: 'Backend online' },
   nokey: {
     label: 'Key missing', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-400',
-    title: 'Backend is running but the Google service account key file was not found (see README)',
+    title: 'Google key file missing — see README',
   },
   offline: {
     label: 'Server offline', dot: 'bg-red-500 animate-pulse', text: 'text-red-400',
-    title: 'Backend offline — start the Python server',
+    title: 'Backend offline — start uvicorn',
   },
 }
 
-function InputMeter({ db, clipping, active }) {
-  // -60 dBFS … 0 dBFS; speech from a mixer should sit around -20 … -10.
+function InputMeter({ db, clipping, snr, active }) {
   const fraction = Math.min(1, Math.max(0, (db + 60) / 60))
   return (
-    <div className="flex w-full items-center gap-1.5" title={`Input ${db.toFixed(0)} dBFS`}>
+    <div className="flex w-full items-center gap-1.5" title={`Input ${db.toFixed(0)} dBFS${snr != null ? ` · SNR ~${snr} dB` : ''}`}>
       <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-3">
         <div
           className={`h-full rounded-full transition-[width] duration-100 ${
@@ -73,21 +68,35 @@ function RoundButton({ color, label, onClick, disabled, children }) {
   )
 }
 
-export default function TranslationControls({ status, backend, level, active, busy, onStart, onStop }) {
+export default function TranslationControls({
+  status, backend, level, active, busy, onStart, onStop, profile, cacheMode,
+}) {
   const cfg = STATUS[status] || STATUS.idle
+  const [meter, setMeter] = useState(level)
+
+  useEffect(() => {
+    setMeter(level)
+  }, [level])
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between text-[11px]">
         <span className={`flex items-center gap-1.5 font-semibold ${cfg.text}`}>
           <span className={`h-2 w-2 rounded-full ${cfg.dot}`} />
           {cfg.label}
+          {cacheMode && <span className="ml-1 text-[9px] font-normal text-amber-400">CACHE</span>}
         </span>
-        <span
-          className={`flex items-center gap-1 ${SERVER[backend].text}`}
-          title={SERVER[backend].title}
-        >
+        <span className={`flex items-center gap-1 ${SERVER[backend].text}`} title={SERVER[backend].title}>
           <span className={`h-1.5 w-1.5 rounded-full ${SERVER[backend].dot}`} />
           {SERVER[backend].label}
+        </span>
+      </div>
+
+      <div className="flex items-center">
+        <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+          profile === 'event' ? 'bg-emerald-950 text-emerald-300' : 'bg-slate-800 text-slate-400'
+        }`}>
+          {profile}
         </span>
       </div>
 
@@ -100,7 +109,7 @@ export default function TranslationControls({ status, backend, level, active, bu
         </RoundButton>
       </div>
 
-      <InputMeter db={level.db} clipping={level.clipping} active={active} />
+      <InputMeter db={meter.db} clipping={meter.clipping} snr={meter.snr} active={active} />
     </div>
   )
 }

@@ -71,7 +71,7 @@ function Spinner({ label, progress, onCancel }) {
   )
 }
 
-export default function PowerPointViewer({ mediaSinkId, onAudibleMediaChange }) {
+export default React.memo(function PowerPointViewer({ mediaSinkId, onAudibleMediaChange }) {
   const [deck, setDeck] = useState(null) // { kind: 'pdf'|'pptx', name, source, manifest? }
   const [loading, setLoading] = useState(null) // { phase, progress }
   const [loadError, setLoadError] = useState(null)
@@ -274,4 +274,4 @@ export default function PowerPointViewer({ mediaSinkId, onAudibleMediaChange }) 
       {deck && <NavArrow direction="right" onClick={() => go(1)} disabled={page >= numPages} />}
     </div>
   )
-}
+})

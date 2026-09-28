@@ -2,12 +2,13 @@
  * useDeviceEnumerator.js
  * ──────────────────────
  * Lists audio inputs (for the mixer feed) and audio outputs (for slide
- * video sound), and auto-selects the USB sound card.
+ * video sound), and auto-selects the best input: mixer / USB sound card,
+ * then a Bluetooth or headset mic, then the built-in laptop mic.
  *
- * USB detection: device labels containing "USB" or a common audio-interface
- * brand. Windows also lists virtual "Default - …" and "Communications - …"
- * aliases; we prefer the concrete device so capture stays pinned to the
- * sound card even if someone changes the Windows default mid-event.
+ * Each input gets a `kind` (mixer | headset | mic) from its label, which
+ * also decides the capture mode (mixer = browser DSP off). Windows' virtual
+ * "Default - …" / "Communications - …" aliases are hidden so capture stays
+ * pinned to a real device even if the Windows default changes mid-event.
  *
  * Labels are only exposed after microphone permission is granted, so a
  * short permission probe runs first.
@@ -15,10 +16,24 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 
-const USB_PATTERN =
-  /\busb\b|behringer|focusrite|scarlett|presonus|steinberg|roland|tascam|yamaha|audient|motu|mackie|m-audio|zoom|ugreen|sound ?blaster|creative|u-phoria|umc\d/i
+const HEADSET_PATTERN = /bluetooth|hands-?free|headset|airpods|buds|\bbt\b/i
+const MIXER_PATTERN =
+  /\busb\b|line ?in|behringer|focusrite|scarlett|presonus|steinberg|roland|tascam|yamaha|audient|motu|mackie|m-audio|zoom|ugreen|sound ?blaster|creative|u-phoria|umc\d/i
+
+// Higher rank wins auto-selection: mixer feed > headset/Bluetooth mic > built-in mic.
+const RANK = { mixer: 3, headset: 2, mic: 1 }
 
 const ALIAS_IDS = new Set(['default', 'communications'])
+
+function classify(label) {
+  if (HEADSET_PATTERN.test(label)) return 'headset'
+  if (MIXER_PATTERN.test(label)) return 'mixer'
+  return 'mic'
+}
+
+function cleanLabel(label) {
+  return label.replace(/^(Default|Communications) - /, '').replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, '')
+}
 
 function describePermissionError(err) {
   switch (err?.name) {
@@ -34,13 +49,7 @@ function describePermissionError(err) {
 }
 
 function pickPreferred(inputs) {
-  const concrete = inputs.filter((d) => !ALIAS_IDS.has(d.deviceId))
-  return (
-    concrete.find((d) => d.isUSB) ||
-    inputs.find((d) => d.isUSB) ||
-    inputs.find((d) => d.deviceId === 'default') ||
-    inputs[0]
-  )
+  return inputs.reduce((best, d) => (!best || RANK[d.kind] > RANK[best.kind] ? d : best), null)
 }
 
 export function useDeviceEnumerator() {
@@ -50,6 +59,7 @@ export function useDeviceEnumerator() {
   const [permissionError, setPermissionError] = useState(null)
   const [enumerating, setEnumerating] = useState(false)
   const permissionGrantedRef = useRef(false)
+  const knownIdsRef = useRef(null)
 
   const enumerate = useCallback(async () => {
     setEnumerating(true)
@@ -67,24 +77,30 @@ export function useDeviceEnumerator() {
       setPermissionError(null)
 
       const all = await navigator.mediaDevices.enumerateDevices()
-      const audioInputs = all
-        .filter((d) => d.kind === 'audioinput')
-        .map((d) => ({
-          deviceId: d.deviceId,
-          label: d.label || `Audio input ${d.deviceId.slice(0, 6)}`,
-          isUSB: USB_PATTERN.test(d.label),
-        }))
+      const rawInputs = all.filter((d) => d.kind === 'audioinput')
+      const concrete = rawInputs.filter((d) => !ALIAS_IDS.has(d.deviceId))
+      const audioInputs = (concrete.length ? concrete : rawInputs).map((d) => {
+        const label = d.label || `Audio input ${d.deviceId.slice(0, 6)}`
+        return { deviceId: d.deviceId, label: cleanLabel(label), kind: classify(label) }
+      })
       const audioOutputs = all
         .filter((d) => d.kind === 'audiooutput')
         .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Audio output' }))
 
+      // A newly plugged-in device that outranks the current one takes over,
+      // so connecting a mixer or Bluetooth mic needs no clicks.
+      const known = knownIdsRef.current
+      const fresh = known ? audioInputs.filter((d) => !known.has(d.deviceId)) : []
+      knownIdsRef.current = new Set(audioInputs.map((d) => d.deviceId))
+
       setInputs(audioInputs)
       setOutputs(audioOutputs)
-      setSelectedDeviceId((prev) =>
-        prev && audioInputs.some((d) => d.deviceId === prev)
-          ? prev
-          : pickPreferred(audioInputs)?.deviceId ?? null,
-      )
+      setSelectedDeviceId((prev) => {
+        const current = audioInputs.find((d) => d.deviceId === prev)
+        if (!current) return pickPreferred(audioInputs)?.deviceId ?? null
+        const bestFresh = pickPreferred(fresh)
+        return bestFresh && RANK[bestFresh.kind] > RANK[current.kind] ? bestFresh.deviceId : prev
+      })
     } catch (err) {
       console.error('[Devices] Enumeration failed:', err)
       setPermissionError(describePermissionError(err))

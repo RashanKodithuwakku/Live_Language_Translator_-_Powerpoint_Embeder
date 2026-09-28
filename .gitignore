@@ -56,3 +56,9 @@ logs/
 
 # Converted presentation cache
 backend/.presentations/
+
+# Runtime spend / translation cache (never commit)
+backend/usage_ledger.json
+backend/.cache/
+backend/fixtures/
+

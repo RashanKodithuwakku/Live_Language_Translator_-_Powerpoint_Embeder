@@ -1,22 +1,6 @@
 /**
- * App.jsx
- * ───────
- * Two boxes, full viewport, no page scroll:
- *
- *   ┌──────────────────────────────────────────────┐
- *   │  A: Presentation (strict 16:9 stage, flex-1) │
- *   ├──────────┬───────────────────────────────────┤
- *   │ operator │  B: Sinhala                        │
- *   │ controls │     Tamil                          │
- *   │ (small)  │     Original                       │
- *   └──────────┴───────────────────────────────────┘
- *
- * Box B's height scales with the window (clamp) so Box A keeps most of the
- * screen; below the md breakpoint the operator column stacks on top.
- *
- * Only final results update the subtitles; each one replaces all three
- * lines. `seq` re-keys the lines so the entry animation replays even when
- * a sentence repeats verbatim.
+ * App shell: 16:9 slides (memoized) + operator column + 3-line subtitles.
+ * Interim captions update the original line immediately; finals replace all three.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
@@ -31,8 +15,9 @@ import { useAudioStream } from './hooks/useAudioStream'
 import { useDeviceEnumerator } from './hooks/useDeviceEnumerator'
 import { useBackendHealth } from './hooks/useBackendHealth'
 
-const EMPTY_SUBTITLES = { sinhala: '', tamil: '', original: '', seq: 0 }
+const EMPTY_SUBTITLES = { sinhala: '', tamil: '', original: '', seq: 0, interim: false }
 const NOTICE_MS = 8000
+const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 function useStoredState(key, initial) {
   const [value, setValue] = useState(() => {
@@ -49,11 +34,17 @@ export default function App() {
   const [active, setActive] = useState(false)
   const [busy, setBusy] = useState(false)
   const [mediaAudible, setMediaAudible] = useState(false)
+  const [usage, setUsage] = useState(null)
+  const [latency, setLatency] = useState(null)
+  const [showLatency, setShowLatency] = useStoredState('liveTranslator.showLatency', false)
   const [pauseDuringMedia, setPauseDuringMedia] = useStoredState('liveTranslator.pauseDuringMedia', true)
   const [mediaSinkId, setMediaSinkId] = useStoredState('liveTranslator.mediaSinkId', '')
   const [speakerLanguage, setSpeakerLanguage] = useStoredState('liveTranslator.speakerLanguage', 'si-LK')
+  const [profile, setProfile] = useStoredState('liveTranslator.profile', 'eco')
   const seqRef = useRef(0)
   const noticeTimer = useRef(null)
+  const paintRef = useRef(0)
+  const pendingSubs = useRef(EMPTY_SUBTITLES)
 
   const showNotice = useCallback((message) => {
     clearTimeout(noticeTimer.current)
@@ -61,21 +52,59 @@ export default function App() {
     noticeTimer.current = setTimeout(() => setNotice(null), NOTICE_MS)
   }, [])
 
+  const paintSubtitles = useCallback((updater) => {
+    const base = pendingSubs.current
+    const next = typeof updater === 'function' ? updater(base) : updater
+    pendingSubs.current = next
+    if (paintRef.current) return
+    paintRef.current = requestAnimationFrame(() => {
+      paintRef.current = 0
+      setSubtitles(pendingSubs.current)
+    })
+  }, [])
+
   const handleMessage = useCallback((msg) => {
-    if (msg.type === 'translation' && msg.isFinal) {
-      seqRef.current += 1
-      setSubtitles({
-        sinhala: msg.sinhala || '',
-        tamil: msg.tamil || '',
-        original: msg.original || '',
-        seq: seqRef.current,
-      })
-    } else if (msg.type === 'error') {
+    if (msg.type === 'translation') {
+      if (msg.latency) setLatency(msg.latency)
+      if (msg.isFinal) {
+        seqRef.current += 1
+        paintSubtitles({
+          sinhala: msg.sinhala || '',
+          tamil: msg.tamil || '',
+          original: msg.original || '',
+          seq: seqRef.current,
+          interim: false,
+        })
+      } else {
+        paintSubtitles((base) => {
+          const next = msg.original || ''
+          // Within one sentence, don't let a revised interim shrink the line.
+          const shrinking = base.interim && next.length < base.original.length && base.original.startsWith(next)
+          const original = shrinking ? base.original : next || base.original
+          return {
+            sinhala: msg.sinhala ? msg.sinhala : base.sinhala,
+            tamil: msg.tamil ? msg.tamil : base.tamil,
+            original,
+            seq: base.seq,
+            interim: true,
+          }
+        })
+      }
+      return
+    }
+    if (msg.type === 'usage') setUsage(msg.usage)
+    else if (msg.type === 'error') showNotice(msg.message)
+    else if (msg.type === 'status' && /budget|idle|noise|cache|resumed|override/i.test(msg.message || '')) {
       showNotice(msg.message)
     }
-  }, [showNotice])
+  }, [paintSubtitles, showNotice])
 
-  const { connect, disconnect, sendAudio, connectionStatus } = useWebSocket(handleMessage)
+  const { connect, disconnect, sendAudio, setLanguage, connectionStatus } = useWebSocket(handleMessage)
+
+  const handleSpeakerLanguageChange = useCallback((code) => {
+    setSpeakerLanguage(code)
+    setLanguage(code)
+  }, [setSpeakerLanguage, setLanguage])
   const audio = useAudioStream(sendAudio)
   const devices = useDeviceEnumerator()
   const backend = useBackendHealth()
@@ -84,16 +113,28 @@ export default function App() {
   const { setGated } = audio
   useEffect(() => setGated(gated), [gated, setGated])
 
+  useEffect(() => {
+    fetch(`${API}/api/usage`)
+      .then((r) => r.json())
+      .then(setUsage)
+      .catch(() => {})
+  }, [])
+
   const handleStart = useCallback(async () => {
     setBusy(true)
     setNotice(null)
     setSubtitles(EMPTY_SUBTITLES)
-    connect(speakerLanguage)
-    const ok = await audio.startStreaming(devices.selectedDeviceId)
+    pendingSubs.current = EMPTY_SUBTITLES
+    connect(speakerLanguage, profile)
+    const device = devices.inputs.find((d) => d.deviceId === devices.selectedDeviceId)
+    const ok = await audio.startStreaming(devices.selectedDeviceId, {
+      mode: device?.kind === 'mixer' ? 'mixer' : 'mic',
+      channel: 'sum',
+    })
     if (ok) setActive(true)
     else disconnect()
     setBusy(false)
-  }, [connect, disconnect, audio, devices.selectedDeviceId, speakerLanguage])
+  }, [connect, disconnect, audio, devices.inputs, devices.selectedDeviceId, speakerLanguage, profile])
 
   const handleStop = useCallback(() => {
     setActive(false)
@@ -110,6 +151,7 @@ export default function App() {
   else if (active) status = 'live'
 
   const operatorMessage = audio.error || notice
+  const cacheMode = usage?.mode === 'cache'
 
   return (
     <div className="flex h-full flex-col gap-3 bg-base p-2 sm:p-3">
@@ -131,7 +173,21 @@ export default function App() {
               busy={busy}
               onStart={handleStart}
               onStop={handleStop}
+              profile={profile}
+              cacheMode={cacheMode}
             />
+            <button
+              type="button"
+              className="mt-1 text-[9px] text-slate-600 hover:text-slate-400"
+              onClick={() => setShowLatency((v) => !v)}
+            >
+              {showLatency ? 'Hide latency' : 'Latency'}
+            </button>
+            {showLatency && latency && (
+              <pre className="mt-1 max-h-20 overflow-auto text-[8px] leading-tight text-slate-500">
+                {JSON.stringify(latency.last || latency, null, 0)}
+              </pre>
+            )}
           </div>
           <div className="min-w-0 flex-1 md:flex-none">
             <DeviceSelector
@@ -144,7 +200,9 @@ export default function App() {
               enumerating={devices.enumerating}
               onRefresh={devices.refresh}
               speakerLanguage={speakerLanguage}
-              onSpeakerLanguageChange={setSpeakerLanguage}
+              onSpeakerLanguageChange={handleSpeakerLanguageChange}
+              profile={profile}
+              onProfileChange={setProfile}
               mediaSinkId={mediaSinkId}
               onMediaSinkChange={setMediaSinkId}
               pauseDuringMedia={pauseDuringMedia}
@@ -153,7 +211,7 @@ export default function App() {
           </div>
         </aside>
 
-        <div className="h-52 min-w-0 flex-1 px-4 py-2 sm:h-60 md:h-auto md:px-6 md:py-3">
+        <div className={`h-52 min-w-0 flex-1 px-4 py-2 sm:h-60 md:h-auto md:px-6 md:py-3 ${subtitles.interim ? 'opacity-90' : ''}`}>
           <SubtitlePanel subtitles={subtitles} />
         </div>
 
