@@ -1,0 +1,86 @@
+{
+  "_note": "Caption blocklist. exact = whole word only; prefix = word stem (all suffixed forms); contains = anywhere inside a word (catches compounds like සමලිංගික); phrases = multi-word. Matching ignores zero-width joiners and common recogniser letter confusions (ණ/න, ළ/ල, ෂ/ශ/ස, ථ/ත, ධ/ද, ඟ/ංග; ண/ந/ன, ற/ர, ள/ழ/ல). Use exact for short words that begin innocent words (පක vs පක්ෂය). Edits apply within ~5 s without restarting. Run backend/tests/test_content_filter.py after editing.",
+
+  "sinhala": {
+    "exact": [
+      "පක", "පකා", "පකයා", "පකයෝ", "පකය", "පකේ", "පකෝ", "පකයට", "පකයගෙ", "පකයගේ", "පකයින්", "පකයො",
+      "පුක", "පුකේ", "පුකට", "පුකෙන්", "පුකක්", "පුකේට", "පුකපාර", "පුකෙ",
+      "කැරි", "කැරියා", "කැරියෝ", "කැරිය", "කැරියගෙ", "කැරියො", "කැරියන්", "කැරී",
+      "ලබ්බ", "ලබ්බා", "ලබ්බේ", "ලබ්බක්", "ලබ්බෙ",
+      "තන", "රතිය", "රතියේ",
+      "රමණය", "රමණයේ", "රමණයට", "රමණයක්", "රමණයෙන්",
+      "කාමය", "කාමයෙන්", "කාමයට", "කාමයේ",
+      "ගූ", "ගුව", "ගූව",
+      "බූරුවා", "බූරුවෝ", "මෝඩයා", "මෝඩයෝ", "තක්කඩියා", "තක්කඩි", "ගොන්නා",
+      "කාලකණ්ණියා", "කාලකණ්ණි", "අවජාතකයා"
+    ],
+    "prefix": [
+      "හුත්ත", "හුත්ති", "හුත්තො",
+      "හුකන", "හුකප", "හුකා", "හුකපු", "හුකල", "හුකුව", "හුකද්දි", "හුකගෙන", "හුකන්න",
+      "වේසි", "වේසා", "වේසමුනි", "වේශ්‍යා", "ගණිකා",
+      "කිම්බ", "පයිය", "බැල්ලි", "පොන්නය", "පොන්නි", "සල්ලාල", "කැරිකෑ", "කැරිපොට්ට",
+      "සංසර්ග", "සම්භෝග", "මෛථුන", "රතිවින්දන", "රතිකාම", "රතික්‍රීඩා",
+      "කාමුක", "කාමාශා", "කාමාතුර", "කාමෝද්", "කාමාස්වාද",
+      "යෝනි", "ශිෂ්න", "පියයුරු", "තනපුඩු", "ශුක්‍රාණු",
+      "නිරුවත්", "නග්න", "නිර්වස්ත්‍ර",
+      "ස්වයංවින්දන", "අසභ්‍ය", "අශ්ලීල", "කාමෝත්තේජ",
+      "අතවර", "දූෂකයා",
+      "සෙක්ස්", "සෙක්සි", "පෝර්න්"
+    ],
+    "contains": [
+      "ලිංග",
+      "හුත්ත", "වේශ්‍යා", "සංසර්ග", "සම්භෝග", "මෛථුන", "ස්වයංවින්දන", "කාමුක", "අසභ්‍ය", "පියයුරු"
+    ],
+    "phrases": [
+      "ස්ත්‍රී දූෂණය", "ස්ත්‍රී දූෂණ", "ළමා දූෂණ", "ළමා දූෂණය", "රති ක්‍රීඩා", "රති ක්‍රීඩාව",
+      "අනියම් සබඳතා", "අනියම් සම්බන්ධතා", "කාම සුඛ", "කාම සුඛය",
+      "ලිංගික හිරිහැර", "පොන් චිත්‍රපට", "පෝන් චිත්‍රපට", "නිල් චිත්‍රපට", "වැඩිහිටියන්ට පමණයි",
+      "ස්ත්‍රී දූෂක", "ස්ත්‍රී දූෂකයා", "ජංගම ගණිකා", "ශුක්‍ර තරලය",
+      "වේසි පුතා", "අම්මට හුකන", "අම්මට හුකපන්"
+    ]
+  },
+
+  "tamil": {
+    "exact": [
+      "சூத்து", "சூத்தை", "மயிர்", "மயிரு", "லவடா", "முண்ட", "காமம்", "முலை", "பூல்",
+      "கலவி", "லிங்கம்", "அம்மணம்", "புணர்ந்து", "புணர்தல்", "புணர்வு",
+      "நாயே", "சனியன்", "முட்டாள்", "லூசு", "பொட்டை", "கேனப்பய", "பொறம்போக்கு"
+    ],
+    "prefix": [
+      "புண்ட", "ஓத்த", "ஓழ்", "ஓம்மால", "ஓம்மா", "தேவடியா", "தேவுடியா", "தேவிடியா", "தேவ்டியா", "கூதி", "சுன்னி", "வேசி",
+      "பாலியல்", "பாலுறவ", "உடலுறவ", "ஆணுறுப்ப", "பெண்ணுறுப்ப", "பிறப்புறுப்ப", "ஆண்குறி", "பெண்குறி",
+      "மார்பக", "விந்து", "யோனி", "ஓரினச்சேர்க்கை", "கள்ளக்காதல்",
+      "விபச்சார", "நிர்வாண", "காமக்", "காமுக", "காமவெறி", "கற்பழ", "பலாத்கார", "ஆபாச", "செக்ஸ்"
+    ],
+    "contains": ["பாலியல்", "உடலுறவு", "புண்டை", "தேவடியா"],
+    "phrases": ["தகாத உறவு", "பாலியல் தொல்லை", "வயது வந்தோருக்கு மட்டும்"]
+  },
+
+  "english": {
+    "exact": [
+      "dick", "dicks", "cock", "cocks", "ass", "arse", "tits", "titty", "damn", "crap", "hoe", "hoes",
+      "condom", "condoms", "lust", "lusts", "lustful", "lusty", "boobs", "idiot", "stupid", "moron"
+    ],
+    "prefix": [
+      "sex", "bitch", "bastard", "asshole", "arsehole", "slut", "whore", "nude", "naked",
+      "rape", "penis", "vagina", "boob", "orgasm", "erotic", "masturbat",
+      "intercourse", "prostitut", "horny", "genital", "pussy", "dildo", "blowjob",
+      "nipple", "testic", "scrotum", "lewd", "obscen", "kinky", "fetish",
+      "incest", "molest", "pervert", "bollock", "wank", "jerkoff", "hooker", "stripper",
+      "seduc", "aroused", "arousal", "homosex", "bisex", "heterosex", "transsex", "lesbian"
+    ],
+    "contains": ["fuck", "shit", "cunt", "porn", "motherf", "sexual"],
+    "phrases": ["blow job", "hand job", "jerk off", "adults only"]
+  },
+
+  "romanised": {
+    "exact": [
+      "paka", "pakaya", "pakayo", "puka", "kari", "kariya", "kariyo", "labba", "kimba",
+      "payya", "ponnaya", "ponna", "hutta", "huththa", "huththi", "wesi", "wesa",
+      "pundai", "punda", "pundamavane", "otha", "ommala", "koothi", "sunni",
+      "oombu", "mayiru", "soothu", "lavada", "thevidiya", "thevdiya", "lingika"
+    ],
+    "prefix": ["huththa", "hukan", "hukap", "wesige", "thevidiy", "thevdiy", "pundamav", "lingik"],
+    "phrases": []
+  }
+}

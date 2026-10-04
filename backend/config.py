@@ -60,6 +60,7 @@ ALTERNATIVE_LANGUAGES = [
 ]
 
 STT_MODEL = os.getenv("STT_MODEL", "default")
+STT_PROFANITY_FILTER = _bool("STT_PROFANITY_FILTER", "true")
 AUTO_PUNCTUATION = _bool("STT_AUTO_PUNCTUATION", "true")
 ENABLE_WORD_CONFIDENCE = _bool("STT_WORD_CONFIDENCE", "true")
 ENABLE_WORD_TIME_OFFSETS = _bool("STT_WORD_TIME_OFFSETS", "true")
@@ -89,6 +90,12 @@ TRANSLATE_PROGRESSIVE = PROFILE == "event" or _bool("TRANSLATE_PROGRESSIVE", "fa
 TRANSLATE_MIN_INTERVAL_MS = _int("TRANSLATE_MIN_INTERVAL_MS", 350)
 TRANSLATE_CACHE = _bool("TRANSLATE_CACHE", "true")
 
+# Content filter: drop = hide the whole caption (event), mask = show "…" (testing)
+FILTER_ENABLED = _bool("FILTER_ENABLED", "true")
+FILTER_ACTION = os.getenv("FILTER_ACTION", "drop").strip().lower()
+if FILTER_ACTION not in {"drop", "mask"}:
+    FILTER_ACTION = "drop"
+
 # Budget (E7) — ECO hard-stops; EVENT only warns
 DAILY_BUDGET_USD = _float("DAILY_BUDGET_USD", 10.0)
 TOTAL_BUDGET_USD = _float("TOTAL_BUDGET_USD", 250.0)
@@ -97,8 +104,10 @@ BUDGET_HARD_STOP = PROFILE == "eco"
 # Paths
 PHRASES_PATH = ROOT / os.getenv("PHRASES_FILE", "phrases.json")
 PRICING_PATH = ROOT / os.getenv("PRICING_FILE", "pricing.json")
+BLOCKLIST_PATH = ROOT / os.getenv("BLOCKLIST_FILE", "blocklist.json")
 LEDGER_PATH = ROOT / os.getenv("LEDGER_FILE", "usage_ledger.json")
-TRANSLATE_CACHE_PATH = ROOT / ".cache" / "translations.json"
+CACHE_DIR = ROOT / ".cache"
+TRANSLATE_CACHE_PATH = CACHE_DIR / "translations.json"
 CACHE_FIXTURES_PATH = ROOT / "fixtures" / "cache_mode.json"
 
 SAMPLE_RATE_HZ = 16_000
@@ -129,4 +138,6 @@ def summary() -> dict:
         "daily_budget_usd": DAILY_BUDGET_USD,
         "total_budget_usd": TOTAL_BUDGET_USD,
         "budget_hard_stop": BUDGET_HARD_STOP,
+        "content_filter": FILTER_ACTION if FILTER_ENABLED else "off",
+        "stt_profanity_filter": STT_PROFANITY_FILTER,
     }

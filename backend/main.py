@@ -18,6 +18,7 @@ Run for the event (from backend/, venv active):
 import asyncio
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -27,12 +28,31 @@ _env_path = Path(__file__).parent / ".env"
 if _env_path.exists():
     load_dotenv(dotenv_path=_env_path)
 
+for _stream in (sys.stdout, sys.stderr):
+    # Windows consoles default to cp1252; captions are Sinhala/Tamil.
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("main")
+
+
+class _ProbeFilter(logging.Filter):
+    """Drop access-log lines for Chrome DevTools discovery probes (/json/version, /json/list)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args if isinstance(record.args, tuple) else ()
+        path = str(args[2]) if len(args) > 2 else ""
+        return not path.startswith("/json")
+
+
+logging.getLogger("uvicorn.access").addFilter(_ProbeFilter())
 
 _creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if not _creds:

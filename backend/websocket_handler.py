@@ -14,12 +14,15 @@ import asyncio
 import json
 import logging
 import time
+import wave
 from collections import deque
 
+import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
 import config
 from audio_processor import AudioProcessor
+from content_filter import FilterResult, content_filter
 from stt_client import MultiLangRecognizer
 from translation_client import translate_to_sinhala_and_tamil
 from usage_ledger import ledger
@@ -29,6 +32,15 @@ log = logging.getLogger("ws")
 
 ERROR_REPEAT_SUPPRESS_S = 15.0
 AUDIO_QUEUE_MAX = 5  # ~500 ms of 100 ms chunks
+STOP_DRAIN_S = 2.5
+QUIET_DBFS = -58.0
+QUIET_WARN_S = 6.0
+NO_SPEECH_MIN_DBFS = -55.0
+NO_SPEECH_WARN_S = 10.0
+# First seconds of each session's input, kept locally (gitignored) so a
+# failed mixer setup can be diagnosed from the real signal.
+DIAG_RECORD_BYTES = 20 * 2 * 16000
+DIAG_PATH = config.CACHE_DIR / "last_input.wav"
 SPEAKER_LANGUAGES = {"si-LK", "ta-LK", "ta-IN", "en-US", "en-GB"}
 
 
@@ -102,6 +114,19 @@ class TranslationSession:
         self._last_prog_at = 0.0
         self._t_utterance_start = 0.0
         self._budget_blocked = False
+        self._delivering = False
+        self._chunks = 0
+        self._level_sum = 0.0
+        self._quiet_s = 0.0
+        self._quiet_warned = False
+        self._interims = 0
+        self._finals = 0
+        self._no_speech_s = 0.0
+        self._no_speech_warned = False
+        self._blocked = 0
+        self._utterance_tainted = False
+        self._diag = bytearray()
+        self._diag_bytes = 0
 
     async def start(self) -> None:
         self._running = True
@@ -111,6 +136,11 @@ class TranslationSession:
             await self._send({"type": "error", "message": warn})
         elif warn:
             await self._send({"type": "status", "message": warn})
+        if config.FILTER_ENABLED and not content_filter.loaded:
+            await self._send({
+                "type": "error",
+                "message": "Content filter list (blocklist.json) failed to load — captions are NOT filtered.",
+            })
 
         self._tasks = [
             asyncio.create_task(self._audio_worker(), name="audio-worker"),
@@ -133,7 +163,26 @@ class TranslationSession:
         self._running = False
         await self._audio_q.put(None)
         self._close_streams(record=True)
+        if notify:
+            # Operator Stop mid-sentence: let Google finalise and translate
+            # the words already spoken instead of discarding them.
+            await self._stt.drain(STOP_DRAIN_S)
+            deadline = time.monotonic() + STOP_DRAIN_S
+            while time.monotonic() < deadline and (self._delivering or not self._stt.results.empty()):
+                await asyncio.sleep(0.05)
         self._stt.close()
+        log.info(
+            "Session summary: %.0fs audio received, avg input %.0f dBFS, speech in %.0f%% of chunks, "
+            "%d speech segments, %d interim / %d final captions, %d filtered",
+            self._chunks * 0.1,
+            (self._level_sum / self._chunks) if self._chunks else -120.0,
+            100 * self._gate.speech_frames / max(1, self._chunks),
+            self._gate.opens,
+            self._interims,
+            self._finals,
+            self._blocked,
+        )
+        await asyncio.to_thread(self._save_recording)
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -177,11 +226,13 @@ class TranslationSession:
             pcm = await self._audio_q.get()
             if pcm is None:
                 return
+            level = await self._check_input_level(pcm)
             t0 = time.monotonic()
             cleaned = await asyncio.to_thread(self._processor.process, pcm)
             self._latency.add("backend_recv_ms", (time.monotonic() - t0) * 1000)
 
             decision = self._gate.process(cleaned)
+            await self._check_speech_found(level, decision.speech_active)
 
             if self._idle_paused:
                 if decision.just_started or decision.frame_is_speech:
@@ -228,6 +279,71 @@ class TranslationSession:
                 self._gate.bump_threshold()
                 await self._send({"type": "status", "message": "Noise floor high — VAD tightened"})
 
+    async def _check_speech_found(self, level: float, speech_active: bool) -> None:
+        if speech_active or level < NO_SPEECH_MIN_DBFS:
+            if speech_active:
+                self._no_speech_s = 0.0
+                self._no_speech_warned = False
+            return
+        self._no_speech_s += 0.1
+        if self._no_speech_s >= NO_SPEECH_WARN_S and not self._no_speech_warned:
+            self._no_speech_warned = True
+            log.warning("Sound present (%.0f dBFS) for %.0fs but no speech detected", level, self._no_speech_s)
+            await self._send({
+                "type": "error",
+                "message": (
+                    "Sound is coming in but no speech is detected. On the mixer, send the "
+                    "microphone channel to the USB/main output and raise its level."
+                ),
+            })
+
+    def _record(self, pcm: bytes) -> None:
+        if self._diag_bytes < DIAG_RECORD_BYTES:
+            self._diag.extend(pcm[: DIAG_RECORD_BYTES - self._diag_bytes])
+            self._diag_bytes = len(self._diag)
+
+    def _save_recording(self) -> None:
+        if not self._diag:
+            return
+        try:
+            config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(DIAG_PATH), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(config.SAMPLE_RATE_HZ)
+                w.writeframes(bytes(self._diag))
+            log.info("Saved first %.0fs of input to %s", len(self._diag) / 32000, DIAG_PATH)
+        except Exception as exc:
+            log.warning("Could not save input recording: %s", exc)
+
+    async def _check_input_level(self, pcm: bytes) -> float:
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
+            return -120.0
+        self._record(pcm)
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        self._chunks += 1
+        if rms == 0:
+            # Exact zeros = UI paused capture for slide media (a muted
+            # device is flagged by the UI meter instead).
+            self._level_sum += -120.0
+            return -120.0
+        level = 20 * np.log10(rms / 32768)
+        self._level_sum += level
+        if level < QUIET_DBFS:
+            self._quiet_s += samples.size / config.SAMPLE_RATE_HZ
+        else:
+            self._quiet_s = 0.0
+            self._quiet_warned = False
+        if self._quiet_s >= QUIET_WARN_S and not self._quiet_warned:
+            self._quiet_warned = True
+            log.warning("Input near-silent for %.0fs (%.0f dBFS)", self._quiet_s, level)
+            await self._send({
+                "type": "error",
+                "message": "No sound from the selected input — check the input device, mute switch, or mixer level.",
+            })
+        return level
+
     def _open_streams(self) -> None:
         if self._streams_open or self._budget_blocked:
             return
@@ -262,63 +378,128 @@ class TranslationSession:
     async def _deliver(self) -> None:
         while True:
             result = await self._stt.results.get()
-            self._words_seen = True
-            original = result.text
-            # Never shrink displayed original on interim
-            if not result.is_final and len(original) < len(self._last_original) and self._last_original.startswith(original):
-                original = self._last_original
-            self._last_original = original
+            self._delivering = True
+            try:
+                await self._deliver_one(result)
+            finally:
+                self._delivering = False
 
-            now = time.monotonic()
-            if self._t_utterance_start:
-                stage = "final_ms" if result.is_final else "google_interim_ms"
-                self._latency.add(stage, (now - self._t_utterance_start) * 1000)
+    async def _deliver_one(self, result) -> None:
+        self._words_seen = True
+        original = result.text
+        # Never shrink displayed original on interim
+        if not result.is_final and len(original) < len(self._last_original) and self._last_original.startswith(original):
+            original = self._last_original
+        self._last_original = original
 
-            progressive = self._profile == "event" and config.TRANSLATE_PROGRESSIVE and not result.is_final
-            finals_only = self._profile == "eco" or not config.TRANSLATE_PROGRESSIVE
+        # Filter before anything is shown or sent to Translate. Once a
+        # sentence's preview held a blocked word, keep hiding its previews:
+        # Google revises previews back and forth.
+        if result.is_final:
+            self._utterance_tainted = False
+        elif self._utterance_tainted and config.FILTER_ACTION == "drop":
+            return
+        checked = content_filter.check(original, interim=not result.is_final)
+        if checked.blocked:
+            if checked.confirmed:
+                self._log_blocked("original", checked, result.is_final)
+                if not result.is_final:
+                    self._utterance_tainted = True
+            if checked.dropped:
+                if result.is_final:
+                    self._last_original = ""
+                return
+            original = checked.text
 
-            if result.is_final or (progressive and self._should_prog_translate(original)):
-                t_tr = time.monotonic()
-                self._translate_seq += 1
-                seq = self._translate_seq
-                si, ta = await translate_to_sinhala_and_tamil(original, result.language)
-                if seq != self._translate_seq and not result.is_final:
-                    continue  # stale progressive
-                self._latency.add("translate_ms", (time.monotonic() - t_tr) * 1000)
-                if si:
-                    self._last_si = si
-                if ta:
-                    self._last_ta = ta
-            elif finals_only and not result.is_final:
-                # ECO interim: show original only
-                await self._send({
-                    "type": "translation",
-                    "sinhala": self._last_si,
-                    "tamil": self._last_ta,
-                    "original": original,
-                    "isFinal": False,
-                    "lang": result.language,
-                    "latency": self._latency.snapshot(),
-                    "debug": result.debug if getattr(result, "debug", None) else self._stt.debug,
-                })
-                continue
+        now = time.monotonic()
+        if self._t_utterance_start:
+            stage = "final_ms" if result.is_final else "google_interim_ms"
+            self._latency.add(stage, (now - self._t_utterance_start) * 1000)
 
-            if self._t_utterance_start:
-                self._latency.add("e2e_ms", (time.monotonic() - self._t_utterance_start) * 1000)
+        progressive = self._profile == "event" and config.TRANSLATE_PROGRESSIVE and not result.is_final
+        finals_only = self._profile == "eco" or not config.TRANSLATE_PROGRESSIVE
 
+        if result.is_final:
+            self._finals += 1
+        else:
+            self._interims += 1
+
+        if result.is_final or (progressive and self._should_prog_translate(original)):
+            t_tr = time.monotonic()
+            self._translate_seq += 1
+            seq = self._translate_seq
+            si, ta = await translate_to_sinhala_and_tamil(original, result.language)
+            if seq != self._translate_seq and not result.is_final:
+                return  # stale progressive
+            self._latency.add("translate_ms", (time.monotonic() - t_tr) * 1000)
+            # Translation can turn an innocent phrase into an offensive one.
+            si_checked, ta_checked = content_filter.check(si), content_filter.check(ta)
+            for label, c in (("sinhala", si_checked), ("tamil", ta_checked)):
+                if c.blocked:
+                    self._log_blocked(label, c, result.is_final)
+            if si_checked.dropped or ta_checked.dropped:
+                if result.is_final:
+                    self._last_original = ""
+                return
+            si, ta = si_checked.text, ta_checked.text
+            if si:
+                self._last_si = si
+            if ta:
+                self._last_ta = ta
+            if result.is_final:
+                log.info(
+                    "Final [%s] %r -> si=%s ta=%s (%.0f ms translate)",
+                    result.language, original[:80], bool(si), bool(ta), (time.monotonic() - t_tr) * 1000,
+                )
+                if not (si and ta):
+                    await self._send_error("Translation failed for the last sentence — check the backend log.")
+        elif finals_only and not result.is_final:
+            # ECO interim: show original only
             await self._send({
                 "type": "translation",
                 "sinhala": self._last_si,
                 "tamil": self._last_ta,
                 "original": original,
-                "isFinal": result.is_final,
+                "isFinal": False,
                 "lang": result.language,
                 "latency": self._latency.snapshot(),
                 "debug": result.debug if getattr(result, "debug", None) else self._stt.debug,
             })
-            if result.is_final:
-                self._last_original = ""
-                await self._send_usage()
+            return
+
+        if self._t_utterance_start:
+            self._latency.add("e2e_ms", (time.monotonic() - self._t_utterance_start) * 1000)
+
+        await self._send({
+            "type": "translation",
+            "sinhala": self._last_si,
+            "tamil": self._last_ta,
+            "original": original,
+            "isFinal": result.is_final,
+            "lang": result.language,
+            "latency": self._latency.snapshot(),
+            "debug": result.debug if getattr(result, "debug", None) else self._stt.debug,
+        })
+        if result.is_final:
+            self._last_original = ""
+            await self._send_usage()
+
+    def _log_blocked(self, line: str, checked: FilterResult, is_final: bool) -> None:
+        # Never log the words themselves.
+        self._blocked += 1
+        log.warning(
+            "Content filter: %d word(s) %s in %s %s line",
+            checked.blocked,
+            "dropped" if checked.dropped else "masked",
+            "final" if is_final else "interim",
+            line,
+        )
+
+    def clear_captions(self) -> None:
+        """Operator Clear: forget the last lines so interims can't re-show them."""
+        self._last_si = ""
+        self._last_ta = ""
+        self._last_original = ""
 
     def _should_prog_translate(self, text: str) -> bool:
         now = time.monotonic()
@@ -403,6 +584,9 @@ async def handle_translation_websocket(websocket: WebSocket) -> None:
                         await session.set_language(new_lang)
                 else:
                     log.warning("Ignoring unknown speaker language %r", new_lang)
+            elif upper == "CLEAR":
+                if session:
+                    session.clear_captions()
             elif upper == "USAGE":
                 if session:
                     await session._send_usage()

@@ -17,6 +17,7 @@ import { useBackendHealth } from './hooks/useBackendHealth'
 
 const EMPTY_SUBTITLES = { sinhala: '', tamil: '', original: '', seq: 0, interim: false }
 const NOTICE_MS = 8000
+const SILENT_WARN_MS = 5000
 const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 function useStoredState(key, initial) {
@@ -99,7 +100,14 @@ export default function App() {
     }
   }, [paintSubtitles, showNotice])
 
-  const { connect, disconnect, sendAudio, setLanguage, connectionStatus } = useWebSocket(handleMessage)
+  const { connect, disconnect, sendAudio, sendText, setLanguage, connectionStatus } = useWebSocket(handleMessage)
+
+  const handleClear = useCallback(() => {
+    pendingSubs.current = EMPTY_SUBTITLES
+    setSubtitles(EMPTY_SUBTITLES)
+    // The backend re-sends its last translations with each live preview.
+    sendText('CLEAR')
+  }, [sendText])
 
   const handleSpeakerLanguageChange = useCallback((code) => {
     setSpeakerLanguage(code)
@@ -112,6 +120,22 @@ export default function App() {
   const gated = pauseDuringMedia && mediaAudible
   const { setGated } = audio
   useEffect(() => setGated(gated), [gated, setGated])
+
+  // Exact digital silence = muted or disconnected device; the backend
+  // can't tell that apart from the slide-media pause, so flag it here.
+  const silentSince = useRef(0)
+  useEffect(() => {
+    if (!active || gated || audio.level.db > -89) {
+      silentSince.current = 0
+      return
+    }
+    const now = performance.now()
+    if (!silentSince.current) silentSince.current = now
+    else if (now - silentSince.current > SILENT_WARN_MS) {
+      silentSince.current = Infinity
+      showNotice('The selected input is silent — it may be muted or the wrong device. Check the input dropdown.')
+    }
+  }, [active, gated, audio.level, showNotice])
 
   useEffect(() => {
     fetch(`${API}/api/usage`)
@@ -129,7 +153,7 @@ export default function App() {
     const device = devices.inputs.find((d) => d.deviceId === devices.selectedDeviceId)
     const ok = await audio.startStreaming(devices.selectedDeviceId, {
       mode: device?.kind === 'mixer' ? 'mixer' : 'mic',
-      channel: 'sum',
+      channel: 'auto',
     })
     if (ok) setActive(true)
     else disconnect()
@@ -211,8 +235,20 @@ export default function App() {
           </div>
         </aside>
 
-        <div className={`h-52 min-w-0 flex-1 px-4 py-2 sm:h-60 md:h-auto md:px-6 md:py-3 ${subtitles.interim ? 'opacity-90' : ''}`}>
+        <div className={`relative h-52 min-w-0 flex-1 px-4 py-2 sm:h-60 md:h-auto md:px-6 md:py-3 ${subtitles.interim ? 'opacity-90' : ''}`}>
           <SubtitlePanel subtitles={subtitles} />
+          <button
+            type="button"
+            onClick={handleClear}
+            className="absolute bottom-2 right-3 z-10 flex items-center gap-1 rounded-md bg-surface-2/90 px-2.5 py-1 text-xs font-semibold text-slate-300 ring-1 ring-border hover:bg-red-900/80 hover:text-white hover:ring-red-700 active:scale-95"
+            title="Clear all subtitle lines now"
+            aria-label="Clear subtitles"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+            Clear
+          </button>
         </div>
 
         {operatorMessage && (

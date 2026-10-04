@@ -60,7 +60,7 @@ export function useAudioStream(sendAudio) {
   const wantStreamingRef = useRef(false)
   const deviceIdRef = useRef(null)
   const modeRef = useRef('mixer')
-  const channelRef = useRef('sum')
+  const channelRef = useRef('auto')
   const gatedRef = useRef(false)
   const clipUntilRef = useRef(0)
   const sendAudioRef = useRef(sendAudio)
@@ -140,6 +140,10 @@ export function useAudioStream(sendAudio) {
 
     let noiseFloor = -60
     node.port.onmessage = ({ data }) => {
+      if (data.channel) {
+        console.info(`[Audio] Using ${data.channel} channel of the stereo input`)
+        return
+      }
       const payload = gatedRef.current ? new ArrayBuffer(data.pcm.byteLength) : data.pcm
       sendAudioRef.current(payload)
 
@@ -166,7 +170,7 @@ export function useAudioStream(sendAudio) {
     graphRef.current = { stream, context, node }
   }, [teardownGraph, publishLevel])
 
-  const startStreaming = useCallback(async (deviceId, { mode = 'mixer', channel = 'sum' } = {}) => {
+  const startStreaming = useCallback(async (deviceId, { mode = 'mixer', channel = 'auto' } = {}) => {
     setError(null)
     wantStreamingRef.current = true
     deviceIdRef.current = deviceId

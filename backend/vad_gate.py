@@ -51,7 +51,10 @@ class SpeechGate:
         self._speech_run = 0
         self._silence_run = 0
         self._noise_floor = -70.0
+        self._levels: deque[float] = deque(maxlen=50)  # 5 s of 100 ms chunks
         self._energy_boost = 0.0  # raised by noise-burn guard
+        self.speech_frames = 0
+        self.opens = 0
 
     def bump_threshold(self) -> None:
         self._energy_boost = min(18.0, self._energy_boost + 3.0)
@@ -66,19 +69,22 @@ class SpeechGate:
             return False
         rms = float(np.sqrt(np.mean(samples * samples)))
         level = 20 * np.log10(rms / 32768.0) if rms > 0 else -120.0
-        # Slow-rising noise floor: adapts quickly downward, slowly upward so
-        # continuous speech does not redefine itself as "noise".
-        if level < self._noise_floor + 3.0:
-            self._noise_floor = 0.90 * self._noise_floor + 0.10 * level
-        else:
-            self._noise_floor = 0.998 * self._noise_floor + 0.002 * level
+        if rms == 0:
+            return False  # UI media pause sends exact zeros
+        # Noise floor = quietest chunk in the last few seconds: gaps between
+        # words keep it at the real background level, and steady mixer hiss
+        # can never rise above it.
+        self._levels.append(level)
+        if len(self._levels) < 5:
+            return False
+        self._noise_floor = min(self._levels)
         threshold = max(self._noise_floor + 12.0 + self._energy_boost, -55.0 + self._energy_boost)
         return level > threshold
 
     def _webrtc_speech(self, pcm: bytes) -> bool:
         # webrtcvad wants 10/20/30 ms frames at 8/16/32/48 kHz.
         if not self._vad or len(pcm) < 320:
-            return self._energy_speech(pcm)
+            return False
         votes = 0
         frames = 0
         # 20 ms = 640 bytes at 16 kHz mono int16
@@ -89,9 +95,9 @@ class SpeechGate:
                 if self._vad.is_speech(pcm[i:i + step], config.SAMPLE_RATE_HZ):
                     votes += 1
             except Exception:
-                return self._energy_speech(pcm)
+                return False
         if frames == 0:
-            return self._energy_speech(pcm)
+            return False
         # webrtcvad alone is enough; energy is only the fallback path.
         return votes * 2 >= frames
 
@@ -99,7 +105,12 @@ class SpeechGate:
         if not config.VAD_ENABLED:
             return GateDecision(True, False, False, [], True)
 
-        is_speech = self._webrtc_speech(pcm) if self._vad else self._energy_speech(pcm)
+        # Either detector may open the gate: webrtcvad can miss band-limited
+        # or heavily processed mixer feeds that still clearly rise above the
+        # noise floor. Energy runs every chunk so its floor stays current.
+        energy = self._energy_speech(pcm)
+        is_speech = energy or (self._vad is not None and self._webrtc_speech(pcm))
+        self.speech_frames += is_speech
         self._ring.append(pcm)
         just_started = False
         just_ended = False
@@ -116,6 +127,7 @@ class SpeechGate:
             if self._speech_run >= self._min_speech_n:
                 self._active = True
                 just_started = True
+                self.opens += 1
                 preroll = list(self._ring)
                 self._ring.clear()
         else:

@@ -50,6 +50,19 @@ MODE=live
 
 Edit `backend/phrases.json` (names, titles, venue terms). Applied to every recogniser. Free accuracy win.
 
+## Content filter (captions)
+
+Every caption line — original, Sinhala, Tamil, live previews and finals — passes through `backend/content_filter.py`. The original is checked **before** translation, and both translations **after** it (translation can create an offensive word from innocent speech).
+
+- `FILTER_ACTION=drop` (event days): a caption containing a blocked word is not shown at all.
+- `FILTER_ACTION=mask` (testing): each blocked word shows as `…`, so you can see what is caught.
+- `STT_PROFANITY_FILTER=true`: Google's own masking (mainly English); its `f***` output is also blocked.
+- Word list: `backend/blocklist.json`, grouped by language. `exact` = whole word only (use for short words that start innocent words, e.g. පක vs පක්ෂය); `prefix` = stem, catches every suffixed form (ලිංගික → ලිංගිකත්වය); `contains` = anywhere in a word, catches compounds (ලිංග → සමලිංගික, ලිංගය, ලිංගභේදය); `phrases` = multi-word. Edits apply within ~5 s, no restart.
+- Extra protection (Sinhala-first): recogniser letter confusions are treated as the same letter (ණ/න, ළ/ල, ෂ/ශ, ථ/ත, ධ/ද, ඟ/ංග, long/short vowel signs; Tamil ண/ந/ன, ற/ர, ள/ழ/ல); invisible joiners are ignored; a word split in two ("හුත් තා") is rejoined; in live previews an unfinished last word that could become a blocked word ("ලිංගි…", "homose…") is held back; once a sentence's preview contained a blocked word, the rest of that sentence's previews stay hidden.
+- After editing the list run `python tests/test_content_filter.py` (from `backend/`, venv active). It checks 100+ offensive forms are blocked and that event vocabulary (all of `phrases.json`) and everyday words (පක්ෂය, කාමරය, ශුක්‍රවාදා, ගණිතය, சூத்திரம், பண்ணி…) still pass. The backend also logs a warning at startup if any `phrases.json` entry would be blocked.
+- The backend log records only counts ("1 word(s) dropped …"), never the words.
+- Operator **Clear** button (bottom-right of the subtitle area) blanks all three lines instantly.
+
 ## Mixer calibration checklist
 
 1. Profile **EVENT**, capture **Mixer / line**, USB sound card selected (green line).

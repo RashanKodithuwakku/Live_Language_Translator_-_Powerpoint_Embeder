@@ -86,6 +86,7 @@ def _build_config(primary: str, use_alternatives: bool) -> speech.StreamingRecog
         language_code=primary,
         alternative_language_codes=alts,
         enable_automatic_punctuation=config.AUTO_PUNCTUATION,
+        profanity_filter=config.STT_PROFANITY_FILTER,
         model=model,
         speech_contexts=_load_phrases(),
     )
@@ -251,7 +252,14 @@ class LangStream:
         self._silence_s = 0.0
         self._speech_s = 0.0
         self._utterance_s = 0.0
+        self._floor_db = -60.0
+        self._closing: list[_RecognizeStream] = []
         self.total_audio_s = 0.0
+
+    def finalizing(self) -> bool:
+        """True while a half-closed Google stream may still return its final."""
+        self._closing = [s for s in self._closing if not s.finished]
+        return bool(self._closing)
 
     def open(self) -> None:
         if self._closed:
@@ -287,6 +295,7 @@ class LangStream:
         """End current Google stream (finalize) without marking session closed."""
         if self._current:
             self._current.close()
+            self._closing.append(self._current)
             self._current = None
         self._speech_s = self._silence_s = self._utterance_s = 0.0
 
@@ -296,6 +305,7 @@ class LangStream:
         self._speech_s = self._silence_s = self._utterance_s = 0.0
         if old:
             old.close()
+            self._closing.append(old)
         return self._current
 
     def _endpoint(self, pcm: bytes) -> bool:
@@ -306,7 +316,13 @@ class LangStream:
         duration = samples.size / config.SAMPLE_RATE_HZ
         rms = float((samples * samples).mean() ** 0.5)
         level = 20 * np.log10(rms / 32768) if rms > 0 else -120.0
-        speaking = level > -45
+        # A fixed threshold never sees a pause on a gain-boosted laptop mic
+        # in a noisy room, so track the noise floor (falls fast, rises slowly).
+        if level < self._floor_db:
+            self._floor_db = 0.7 * self._floor_db + 0.3 * level
+        else:
+            self._floor_db += 0.005 * (level - self._floor_db)
+        speaking = level > max(-45.0, self._floor_db + 9.0)
         if speaking:
             self._speech_s += duration
             self._silence_s = 0.0
@@ -407,6 +423,17 @@ class MultiLangRecognizer:
             s.close()
         if self._task:
             self._task.cancel()
+
+    async def drain(self, timeout: float) -> None:
+        """Wait for half-closed streams to return their finals, then flush them."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and (
+            any(s.finalizing() for s in self.streams) or not self._inbox.empty()
+        ):
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)
+        if getattr(self, "_pending", None):
+            self._flush_finals()
 
     def set_language(self, lang: str) -> None:
         """Switch the speaker language mid-session; takes effect on the next utterance."""

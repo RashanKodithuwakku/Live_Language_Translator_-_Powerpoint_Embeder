@@ -7,6 +7,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8000/ws/translate'
 const MAX_RECONNECT_DELAY_MS = 5000
+const STOP_GRACE_MS = 6000
 
 export function useWebSocket(onMessage) {
   const wsRef = useRef(null)
@@ -36,10 +37,20 @@ export function useWebSocket(onMessage) {
     }
 
     ws.onmessage = (event) => {
+      let msg
       try {
-        onMessageRef.current?.(JSON.parse(event.data))
+        msg = JSON.parse(event.data)
       } catch {
         console.warn('[WS] Ignoring non-JSON message')
+        return
+      }
+      if (ws.stopping && wsRef.current && wsRef.current !== ws) {
+        ws.close(1000, 'superseded')
+        return
+      }
+      onMessageRef.current?.(msg)
+      if (ws.stopping && msg.type === 'status' && msg.message?.startsWith('Stopped')) {
+        ws.close(1000, 'operator-stop')
       }
     }
 
@@ -70,8 +81,15 @@ export function useWebSocket(onMessage) {
     const ws = wsRef.current
     wsRef.current = null
     if (ws) {
-      if (ws.readyState === WebSocket.OPEN) ws.send('STOP')
-      ws.close(1000, 'operator-stop')
+      if (ws.readyState === WebSocket.OPEN) {
+        // Keep the socket open until the backend has delivered the
+        // sentence that was in progress when Stop was pressed.
+        ws.stopping = true
+        ws.send('STOP')
+        setTimeout(() => ws.close(1000, 'operator-stop'), STOP_GRACE_MS)
+      } else {
+        ws.close(1000, 'operator-stop')
+      }
     }
     setConnectionStatus('idle')
   }, [])
