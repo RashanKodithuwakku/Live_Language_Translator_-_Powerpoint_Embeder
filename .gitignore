@@ -17,7 +17,10 @@ env/
 .env
 backend/.env
 
-# ─── Google Cloud credentials (NEVER commit these) ────────────────────────
+# ─── Google Cloud credentials (NEVER commit these, NEVER push) ────────────
+# Blanket *.json also covers the service-account key. phrase/blocklist JSON
+# that belongs in git must be force-added; the key file must not.
+.env
 *.json
 !package.json
 !package-lock.json

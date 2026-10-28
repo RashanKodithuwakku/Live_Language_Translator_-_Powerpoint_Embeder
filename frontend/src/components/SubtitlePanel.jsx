@@ -6,7 +6,7 @@
  *
  *   Line 1  Sinhala translation   (largest)
  *   Line 2  Tamil translation
- *   Line 3  Original transcript, exactly as spoken (never translated)
+ *   Line 3  English translation
  *
  * Each line owns a fixed share of the panel height. Text starts as large as
  * that row allows (for readability from the back of the hall) and shrinks
@@ -18,11 +18,11 @@ import React, { useLayoutEffect, useRef } from 'react'
 
 const LINES = [
   { key: 'sinhala', tag: 'සිංහල', share: 1.2, maxPx: 60, minPx: 11, lineRatio: 0.62,
-    textClass: 'font-semibold text-slate-50', tagClass: 'text-violet-300 ring-violet-400/40' },
+    textClass: 'font-semibold text-white', tagClass: 'text-zinc-100 ring-white/20' },
   { key: 'tamil', tag: 'தமிழ்', share: 1.1, maxPx: 54, minPx: 11, lineRatio: 0.6,
-    textClass: 'font-semibold text-amber-200', tagClass: 'text-amber-300 ring-amber-400/40' },
-  { key: 'original', tag: 'Original', share: 0.7, maxPx: 30, minPx: 10, lineRatio: 0.6,
-    textClass: 'font-normal text-slate-400', tagClass: 'text-slate-400 ring-slate-500/40' },
+    textClass: 'font-semibold text-zinc-100', tagClass: 'text-zinc-300 ring-white/15' },
+  { key: 'original', tag: 'English', share: 0.7, maxPx: 30, minPx: 10, lineRatio: 0.6,
+    textClass: 'font-normal text-zinc-400', tagClass: 'text-zinc-400 ring-white/10' },
 ]
 
 const GLYPH_SAFETY_PX = 4
@@ -76,7 +76,11 @@ function FitText({ text, maxPx, minPx, lineRatio, className }) {
   )
 }
 
-export default function SubtitlePanel({ subtitles }) {
+// Translation-only view has the whole screen, so let lines grow larger.
+const LARGE_SCALE = 2.2
+
+export default function SubtitlePanel({ subtitles, large = false }) {
+  const scale = large ? LARGE_SCALE : 1
   const hasContent = Boolean(subtitles.sinhala || subtitles.tamil || subtitles.original)
 
   return (
@@ -99,7 +103,7 @@ export default function SubtitlePanel({ subtitles }) {
             <FitText
               key={`${line.key}-${subtitles.seq}`}
               text={subtitles[line.key]}
-              maxPx={line.maxPx}
+              maxPx={line.maxPx * scale}
               minPx={line.minPx}
               lineRatio={line.lineRatio}
               className={`animate-slide-up ${line.textClass}`}

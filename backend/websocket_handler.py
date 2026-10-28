@@ -24,7 +24,8 @@ import config
 from audio_processor import AudioProcessor
 from content_filter import FilterResult, content_filter
 from stt_client import MultiLangRecognizer
-from translation_client import translate_to_sinhala_and_tamil
+from llm_context import clean_sentence
+from translation_client import translate_mixed, translate_to_sinhala_and_tamil
 from usage_ledger import ledger
 from vad_gate import SpeechGate
 
@@ -48,7 +49,7 @@ class LatencyTracker:
     def __init__(self) -> None:
         self.samples: dict[str, deque[float]] = {
             k: deque(maxlen=60)
-            for k in ("backend_recv_ms", "google_interim_ms", "final_ms", "translate_ms", "e2e_ms")
+            for k in ("backend_recv_ms", "google_interim_ms", "final_ms", "translate_ms", "llm_ms", "e2e_ms")
         }
         self.last: dict = {}
 
@@ -108,6 +109,8 @@ class TranslationSession:
         self._last_original = ""
         self._last_si = ""
         self._last_ta = ""
+        self._last_en = ""
+        self._context: deque[str] = deque(maxlen=config.LLM_CONTEXT_SENTENCES)
         self._translate_seq = 0
         self._inflight_si = False
         self._inflight_ta = False
@@ -416,7 +419,20 @@ class TranslationSession:
             stage = "final_ms" if result.is_final else "google_interim_ms"
             self._latency.add(stage, (now - self._t_utterance_start) * 1000)
 
-        progressive = self._profile == "event" and config.TRANSLATE_PROGRESSIVE and not result.is_final
+        # Finished sentences go to Gemini with the previous five captions
+        # before anything new is drawn. Live previews stay off in that mode
+        # so slang in a half-sentence never flashes up.
+        hold_for_llm = config.LLM_ENABLED and not config.is_cache_mode()
+        if hold_for_llm and not result.is_final:
+            self._interims += 1
+            return
+
+        progressive = (
+            not hold_for_llm
+            and self._profile == "event"
+            and config.TRANSLATE_PROGRESSIVE
+            and not result.is_final
+        )
         finals_only = self._profile == "eco" or not config.TRANSLATE_PROGRESSIVE
 
         if result.is_final:
@@ -424,41 +440,68 @@ class TranslationSession:
         else:
             self._interims += 1
 
+        english = self._last_en
         if result.is_final or (progressive and self._should_prog_translate(original)):
             t_tr = time.monotonic()
             self._translate_seq += 1
             seq = self._translate_seq
-            si, ta = await translate_to_sinhala_and_tamil(original, result.language)
+            cleaned = None
+            if result.is_final and hold_for_llm:
+                cleaned = await clean_sentence(original, result.language, list(self._context))
+                self._latency.add("llm_ms", (time.monotonic() - t_tr) * 1000)
+            if cleaned is not None:
+                si, ta, english = cleaned.sinhala, cleaned.tamil, cleaned.english
+                if not (si and ta and english):
+                    fb_si, fb_ta, fb_en = await self._fallback_translate(original, result.language)
+                    si, ta, english = si or fb_si or "", ta or fb_ta or "", english or fb_en or ""
+            else:
+                si, ta, english = await self._fallback_translate(original, result.language)
+                si, ta, english = si or "", ta or "", english or ""
             if seq != self._translate_seq and not result.is_final:
                 return  # stale progressive
             self._latency.add("translate_ms", (time.monotonic() - t_tr) * 1000)
-            # Translation can turn an innocent phrase into an offensive one.
-            si_checked, ta_checked = content_filter.check(si), content_filter.check(ta)
-            for label, c in (("sinhala", si_checked), ("tamil", ta_checked)):
-                if c.blocked:
-                    self._log_blocked(label, c, result.is_final)
-            if si_checked.dropped or ta_checked.dropped:
+            # The model and the translator can both surface a blocked word.
+            screened = {}
+            dropped = False
+            for label, text in (("sinhala", si), ("tamil", ta), ("english", english)):
+                checked_line = content_filter.check(text or "")
+                if checked_line.blocked:
+                    self._log_blocked(label, checked_line, result.is_final)
+                if checked_line.dropped:
+                    dropped = True
+                screened[label] = checked_line.text or ""
+            if dropped:
                 if result.is_final:
                     self._last_original = ""
                 return
-            si, ta = si_checked.text, ta_checked.text
+            si, ta, english = screened["sinhala"], screened["tamil"], screened["english"]
             if si:
                 self._last_si = si
             if ta:
                 self._last_ta = ta
+            if english:
+                self._last_en = english
+            if result.is_final and si:
+                self._context.append(si)
             if result.is_final:
                 log.info(
-                    "Final [%s] %r -> si=%s ta=%s (%.0f ms translate)",
-                    result.language, original[:80], bool(si), bool(ta), (time.monotonic() - t_tr) * 1000,
+                    "Final [%s] cleaned=%s si=%s ta=%s en=%s (%.0f ms)",
+                    result.language,
+                    cleaned is not None,
+                    bool(si),
+                    bool(ta),
+                    bool(english),
+                    (time.monotonic() - t_tr) * 1000,
                 )
                 if not (si and ta):
                     await self._send_error("Translation failed for the last sentence — check the backend log.")
         elif finals_only and not result.is_final:
-            # ECO interim: show original only
+            # ECO interim, only when the context cleaner is off.
             await self._send({
                 "type": "translation",
                 "sinhala": self._last_si,
                 "tamil": self._last_ta,
+                "english": self._last_en,
                 "original": original,
                 "isFinal": False,
                 "lang": result.language,
@@ -474,7 +517,8 @@ class TranslationSession:
             "type": "translation",
             "sinhala": self._last_si,
             "tamil": self._last_ta,
-            "original": original,
+            "english": english,
+            "original": original if not hold_for_llm else "",
             "isFinal": result.is_final,
             "lang": result.language,
             "latency": self._latency.snapshot(),
@@ -495,11 +539,30 @@ class TranslationSession:
             line,
         )
 
+    async def _fallback_translate(self, text: str, language: str) -> tuple[str | None, str | None, str | None]:
+        """Existing translator, used when the context cleaner is off or fails."""
+        pair, english = await asyncio.gather(
+            translate_to_sinhala_and_tamil(text, language),
+            translate_mixed(text, "en", language),
+            return_exceptions=True,
+        )
+        if isinstance(pair, BaseException):
+            log.error("Fallback translation failed: %s", pair)
+            si, ta = None, None
+        else:
+            si, ta = pair
+        if isinstance(english, BaseException):
+            log.error("Fallback English translation failed: %s", english)
+            english = None
+        return si, ta, english
+
     def clear_captions(self) -> None:
         """Operator Clear: forget the last lines so interims can't re-show them."""
         self._last_si = ""
         self._last_ta = ""
+        self._last_en = ""
         self._last_original = ""
+        self._context.clear()
 
     def _should_prog_translate(self, text: str) -> bool:
         now = time.monotonic()

@@ -3,6 +3,8 @@ uvicorn[standard]==0.54.0
 python-dotenv==1.2.3
 google-cloud-speech==2.40.0
 google-cloud-translate==3.27.0
+google-cloud-aiplatform==2.6.0
+google-genai==2.33.0
 noisereduce==3.0.3
 webrtcvad-wheels==2.0.14; platform_system=="Windows"
 webrtcvad==2.0.10; platform_system!="Windows"

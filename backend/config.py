@@ -90,6 +90,15 @@ TRANSLATE_PROGRESSIVE = PROFILE == "event" or _bool("TRANSLATE_PROGRESSIVE", "fa
 TRANSLATE_MIN_INTERVAL_MS = _int("TRANSLATE_MIN_INTERVAL_MS", 350)
 TRANSLATE_CACHE = _bool("TRANSLATE_CACHE", "true")
 
+# Context cleaner. gemini-1.5-flash was discontinued on Vertex on 24 Sep 2025
+# (replacement for that Flash tier is gemini-3.5-flash-lite, region "us").
+# LLM_MODEL can still be pointed at another live Gemini id.
+LLM_ENABLED = _bool("LLM_ENABLED", "true")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
+LLM_LOCATION = os.getenv("LLM_LOCATION", "us").strip() or "us"
+LLM_TIMEOUT_S = _float("LLM_TIMEOUT_S", 6.0)
+LLM_CONTEXT_SENTENCES = max(1, _int("LLM_CONTEXT_SENTENCES", 5))
+
 # Content filter: drop = hide the whole caption (event), mask = show "…" (testing)
 FILTER_ENABLED = _bool("FILTER_ENABLED", "true")
 FILTER_ACTION = os.getenv("FILTER_ACTION", "drop").strip().lower()
@@ -140,4 +149,7 @@ def summary() -> dict:
         "budget_hard_stop": BUDGET_HARD_STOP,
         "content_filter": FILTER_ACTION if FILTER_ENABLED else "off",
         "stt_profanity_filter": STT_PROFANITY_FILTER,
+        "llm_enabled": LLM_ENABLED and not is_cache_mode(),
+        "llm_model": LLM_MODEL,
+        "llm_location": LLM_LOCATION,
     }

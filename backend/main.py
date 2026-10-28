@@ -72,13 +72,14 @@ from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 import presentation_service as presentations  # noqa: E402
 from websocket_handler import handle_translation_websocket  # noqa: E402
 import config  # noqa: E402
+from llm_context import warm_client as warm_llm  # noqa: E402
 from translation_client import warm_client  # noqa: E402
 from usage_ledger import ledger  # noqa: E402
 
 app = FastAPI(
     title="Live Translator Backend",
     description="Real-time multilingual speech translation for live events",
-    version="1.2.0",
+    version="1.2-advanced",
 )
 
 # Localhost-only event tool: allow the Vite dev/preview server origins.
@@ -113,6 +114,7 @@ async def _startup():
     log.info("Runtime: %s", config.summary())
     if not config.is_cache_mode():
         await warm_client()
+        await warm_llm()
 
 
 @app.get("/health")

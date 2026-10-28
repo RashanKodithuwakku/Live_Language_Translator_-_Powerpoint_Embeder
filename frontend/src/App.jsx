@@ -1,6 +1,6 @@
 /**
  * App shell: 16:9 slides (memoized) + operator column + 3-line subtitles.
- * Interim captions update the original line immediately; finals replace all three.
+ * Finals replace all three lines (Sinhala, Tamil, English) after the backend cleans them.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
@@ -17,7 +17,13 @@ import { useBackendHealth } from './hooks/useBackendHealth'
 
 const EMPTY_SUBTITLES = { sinhala: '', tamil: '', original: '', seq: 0, interim: false }
 const NOTICE_MS = 8000
-const SILENT_WARN_MS = 5000
+// Silence/idle hints are normal between speakers; don't pop them up.
+const QUIET_HINT = /no sound|no speech|silent|idle|resumed|noise floor/i
+const VIEWS = [
+  { id: 'both', label: 'Both', title: 'Show slides and translation' },
+  { id: 'slides', label: 'Slides', title: 'Slides only (full screen)' },
+  { id: 'captions', label: 'Translation', title: 'Translation only (full screen)' },
+]
 const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
 function useStoredState(key, initial) {
@@ -42,6 +48,8 @@ export default function App() {
   const [mediaSinkId, setMediaSinkId] = useStoredState('liveTranslator.mediaSinkId', '')
   const [speakerLanguage, setSpeakerLanguage] = useStoredState('liveTranslator.speakerLanguage', 'si-LK')
   const [profile, setProfile] = useStoredState('liveTranslator.profile', 'eco')
+  const [view, setView] = useState('both')
+  const [settingsOpen, setSettingsOpen] = useStoredState('liveTranslator.settingsOpen', true)
   const seqRef = useRef(0)
   const noticeTimer = useRef(null)
   const paintRef = useRef(0)
@@ -67,12 +75,13 @@ export default function App() {
   const handleMessage = useCallback((msg) => {
     if (msg.type === 'translation') {
       if (msg.latency) setLatency(msg.latency)
+      const english = msg.english || ''
       if (msg.isFinal) {
         seqRef.current += 1
         paintSubtitles({
           sinhala: msg.sinhala || '',
           tamil: msg.tamil || '',
-          original: msg.original || '',
+          original: english || msg.original || '',
           seq: seqRef.current,
           interim: false,
         })
@@ -85,7 +94,7 @@ export default function App() {
           return {
             sinhala: msg.sinhala ? msg.sinhala : base.sinhala,
             tamil: msg.tamil ? msg.tamil : base.tamil,
-            original,
+            original: english || original,
             seq: base.seq,
             interim: true,
           }
@@ -94,8 +103,8 @@ export default function App() {
       return
     }
     if (msg.type === 'usage') setUsage(msg.usage)
-    else if (msg.type === 'error') showNotice(msg.message)
-    else if (msg.type === 'status' && /budget|idle|noise|cache|resumed|override/i.test(msg.message || '')) {
+    else if (msg.type === 'error' && !QUIET_HINT.test(msg.message || '')) showNotice(msg.message)
+    else if (msg.type === 'status' && /budget|cache|override/i.test(msg.message || '')) {
       showNotice(msg.message)
     }
   }, [paintSubtitles, showNotice])
@@ -120,22 +129,6 @@ export default function App() {
   const gated = pauseDuringMedia && mediaAudible
   const { setGated } = audio
   useEffect(() => setGated(gated), [gated, setGated])
-
-  // Exact digital silence = muted or disconnected device; the backend
-  // can't tell that apart from the slide-media pause, so flag it here.
-  const silentSince = useRef(0)
-  useEffect(() => {
-    if (!active || gated || audio.level.db > -89) {
-      silentSince.current = 0
-      return
-    }
-    const now = performance.now()
-    if (!silentSince.current) silentSince.current = now
-    else if (now - silentSince.current > SILENT_WARN_MS) {
-      silentSince.current = Infinity
-      showNotice('The selected input is silent — it may be muted or the wrong device. Check the input dropdown.')
-    }
-  }, [active, gated, audio.level, showNotice])
 
   useEffect(() => {
     fetch(`${API}/api/usage`)
@@ -178,16 +171,47 @@ export default function App() {
   const cacheMode = usage?.mode === 'cache'
 
   return (
-    <div className="flex h-full flex-col gap-3 bg-base p-2 sm:p-3">
-      <section className="panel min-h-0 flex-1 p-2 sm:p-3" aria-label="Presentation">
+    <div className="relative flex h-full flex-col gap-3 bg-base p-2 sm:p-3">
+      <div
+        className="group absolute left-1/2 top-1 z-30 flex -translate-x-1/2 gap-0.5 rounded-full bg-surface-2/80 p-0.5 opacity-40 shadow-lg ring-1 ring-border transition-opacity hover:opacity-100 focus-within:opacity-100"
+        role="group"
+        aria-label="Layout"
+      >
+        {VIEWS.map((v) => (
+          <button
+            key={v.id}
+            type="button"
+            onClick={() => setView(v.id)}
+            title={v.title}
+            aria-pressed={view === v.id}
+            className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold transition ${
+              view === v.id ? 'bg-primary text-slate-950' : 'text-slate-300 hover:bg-surface-3'
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Both panels stay mounted so the deck and the live session survive view changes. */}
+      <section
+        className={`panel min-h-0 flex-1 p-2 sm:p-3 ${view === 'captions' ? 'hidden' : ''}`}
+        aria-label="Presentation"
+      >
         <PowerPointViewer mediaSinkId={mediaSinkId} onAudibleMediaChange={setMediaAudible} />
       </section>
 
       <section
-        className="panel relative flex shrink-0 flex-col md:h-[clamp(220px,30vh,340px)] md:flex-row"
+        className={`panel relative flex flex-col md:flex-row ${
+          view === 'slides'
+            ? 'hidden'
+            : view === 'captions'
+              ? 'min-h-0 flex-1'
+              : 'shrink-0 md:h-[clamp(220px,30vh,340px)]'
+        }`}
         aria-label="Live translation"
       >
-        <aside className="flex shrink-0 flex-row gap-4 overflow-y-auto border-b border-border/60 p-3 md:w-56 md:flex-col md:gap-3 md:border-b-0 md:border-r">
+        <aside className={`flex shrink-0 flex-row gap-4 overflow-y-auto border-b border-white/10 p-3 transition-[width] duration-300 ease-out md:flex-col md:gap-3 md:border-b-0 md:border-r ${settingsOpen ? 'md:w-56' : 'md:w-40'}`}>
           <div className="min-w-0 flex-1 md:flex-none">
             <TranslationControls
               status={status}
@@ -214,29 +238,60 @@ export default function App() {
             )}
           </div>
           <div className="min-w-0 flex-1 md:flex-none">
-            <DeviceSelector
-              inputs={devices.inputs}
-              outputs={devices.outputs}
-              selectedDeviceId={devices.selectedDeviceId}
-              onSelect={devices.setSelectedDeviceId}
-              locked={active || busy}
-              permissionError={devices.permissionError}
-              enumerating={devices.enumerating}
-              onRefresh={devices.refresh}
-              speakerLanguage={speakerLanguage}
-              onSpeakerLanguageChange={handleSpeakerLanguageChange}
-              profile={profile}
-              onProfileChange={setProfile}
-              mediaSinkId={mediaSinkId}
-              onMediaSinkChange={setMediaSinkId}
-              pauseDuringMedia={pauseDuringMedia}
-              onPauseDuringMediaChange={setPauseDuringMedia}
-            />
+            <button
+              type="button"
+              onClick={() => setSettingsOpen((open) => !open)}
+              aria-expanded={settingsOpen}
+              className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-[11px] font-medium text-zinc-400 transition hover:bg-surface-3 hover:text-zinc-100"
+            >
+              <span>{settingsOpen ? 'Hide settings' : 'Show settings'}</span>
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                className={`transition-transform duration-300 ${settingsOpen ? 'rotate-180' : ''}`}
+                aria-hidden="true"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+            <div
+              className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
+                settingsOpen ? 'grid-rows-[1fr] opacity-100' : 'pointer-events-none grid-rows-[0fr] opacity-0'
+              }`}
+            >
+              <div className="min-h-0 overflow-hidden">
+                <div className="pt-2">
+                  <DeviceSelector
+                    inputs={devices.inputs}
+                    outputs={devices.outputs}
+                    selectedDeviceId={devices.selectedDeviceId}
+                    onSelect={devices.setSelectedDeviceId}
+                    locked={active || busy}
+                    permissionError={devices.permissionError}
+                    enumerating={devices.enumerating}
+                    onRefresh={devices.refresh}
+                    speakerLanguage={speakerLanguage}
+                    onSpeakerLanguageChange={handleSpeakerLanguageChange}
+                    profile={profile}
+                    onProfileChange={setProfile}
+                    mediaSinkId={mediaSinkId}
+                    onMediaSinkChange={setMediaSinkId}
+                    pauseDuringMedia={pauseDuringMedia}
+                    onPauseDuringMediaChange={setPauseDuringMedia}
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </aside>
 
         <div className={`relative h-52 min-w-0 flex-1 px-4 py-2 sm:h-60 md:h-auto md:px-6 md:py-3 ${subtitles.interim ? 'opacity-90' : ''}`}>
-          <SubtitlePanel subtitles={subtitles} />
+          <SubtitlePanel subtitles={subtitles} large={view === 'captions'} />
           <button
             type="button"
             onClick={handleClear}

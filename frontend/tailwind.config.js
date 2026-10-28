@@ -4,13 +4,26 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Soft dark palette — never pure black.
-        base: '#121212',
-        surface: '#1e293b',
-        'surface-2': '#243044',
-        'surface-3': '#2d3b52',
-        border: '#334155',
-        primary: '#38bdf8',
+        // Neutral dark palette, close to a Grok-style surface. Never pure black.
+        base: '#0e0e0e',
+        surface: '#161616',
+        'surface-2': '#1f1f1f',
+        'surface-3': '#2a2a2a',
+        border: '#333333',
+        primary: '#f4f4f5',
+        slate: {
+          50: '#fafafa',
+          100: '#f5f5f5',
+          200: '#e5e5e5',
+          300: '#d4d4d4',
+          400: '#a3a3a3',
+          500: '#737373',
+          600: '#525252',
+          700: '#404040',
+          800: '#262626',
+          900: '#171717',
+          950: '#0a0a0a',
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
