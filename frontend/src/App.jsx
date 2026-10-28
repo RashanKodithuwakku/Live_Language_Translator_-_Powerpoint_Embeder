@@ -229,10 +229,10 @@ export default function App() {
       >
         <aside
           inert={settingsOpen ? undefined : ''}
-          className={`flex shrink-0 overflow-hidden transition-[width,opacity,padding] duration-300 ease-out ${
+          className={`flex shrink-0 transition-[width,opacity,padding] duration-300 ease-out ${
             settingsOpen
-              ? 'w-full flex-row gap-4 border-b border-white/10 p-3 opacity-100 md:w-56 md:flex-col md:gap-3 md:border-b-0 md:border-r'
-              : 'pointer-events-none w-0 gap-0 border-0 p-0 opacity-0'
+              ? 'max-h-full min-h-0 w-full flex-row gap-4 overflow-x-hidden overflow-y-auto border-b border-white/10 p-3 opacity-100 md:w-56 md:flex-col md:gap-3 md:border-b-0 md:border-r'
+              : 'pointer-events-none w-0 gap-0 overflow-hidden border-0 p-0 opacity-0'
           }`}
         >
           <div className="min-w-0 flex-1 md:w-full md:flex-none">
