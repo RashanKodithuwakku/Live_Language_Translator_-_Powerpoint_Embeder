@@ -441,6 +441,7 @@ class TranslationSession:
             self._interims += 1
 
         english = self._last_en
+        cleaned_by_llm = False
         if result.is_final or (progressive and self._should_prog_translate(original)):
             t_tr = time.monotonic()
             self._translate_seq += 1
@@ -450,6 +451,7 @@ class TranslationSession:
                 cleaned = await clean_sentence(original, result.language, list(self._context))
                 self._latency.add("llm_ms", (time.monotonic() - t_tr) * 1000)
             if cleaned is not None:
+                cleaned_by_llm = True
                 si, ta, english = cleaned.sinhala, cleaned.tamil, cleaned.english
                 if not (si and ta and english):
                     fb_si, fb_ta, fb_en = await self._fallback_translate(original, result.language)
@@ -518,7 +520,10 @@ class TranslationSession:
             "sinhala": self._last_si,
             "tamil": self._last_ta,
             "english": english,
-            "original": original if not hold_for_llm else "",
+            # Keep a usable source line when the optional LLM is unavailable
+            # and the translator's English fallback also fails. Previously a
+            # final caption could reach the UI with all visible text blank.
+            "original": "" if cleaned_by_llm else original,
             "isFinal": result.is_final,
             "lang": result.language,
             "latency": self._latency.snapshot(),

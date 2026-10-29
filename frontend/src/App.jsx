@@ -32,7 +32,15 @@ const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 function useStoredState(key, initial) {
   const [value, setValue] = useState(() => {
     const stored = localStorage.getItem(key)
-    return stored === null ? initial : JSON.parse(stored)
+    if (stored === null) return initial
+    try {
+      return JSON.parse(stored)
+    } catch {
+      // A manually edited or legacy value must not prevent the operator UI
+      // from loading before they can clear browser storage.
+      localStorage.removeItem(key)
+      return initial
+    }
   })
   useEffect(() => localStorage.setItem(key, JSON.stringify(value)), [key, value])
   return [value, setValue]
