@@ -57,6 +57,14 @@ MUST_PASS = [
     "Dickens", "cocktail", "analysis", "phone", "Good morning, distinguished guests",
 ]
 
+# Formality is the LLM cleaner's responsibility. These common words must reach
+# it rather than being suppressed by the safety blocklist.
+MUST_PASS.extend([
+    "you are welcome", "please stop at the next slide", "come and go as scheduled",
+    "உங்களை வரவேற்கிறோம்", "நீங்கள் செல்லலாம்",
+    "ඔබට ස්තුතියි", "ඔබලා පැමිණෙන්න",
+])
+
 
 def main() -> int:
     fails = 0

@@ -23,6 +23,7 @@ def test_prompt_keeps_five_sentences_and_the_new_one():
     assert "sentence 1" not in prompt
     assert "sentence 2" not in prompt
     assert "ubata" in prompt
+    assert "preserve uncertainty rather than guessing" in prompt
     assert '"sinhala"' in prompt and '"english"' in prompt and '"tamil"' in prompt
 
 
